@@ -136,12 +136,11 @@ class SchedulerConfig:
     """Tuning parameters for the scheduler."""
     slot_minutes: int = 30                  # granularity of work slots
     min_gap_minutes: int = 5               # buffer between a block and a study session
-    max_daily_study_hours: float = 7.0      # cap per day to avoid burnout
+    max_study_hours_by_week: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0])   # max study hours per day of week
     preferred_study_start: time = time(9, 0)
     preferred_study_end: time = time(22, 0)
     days_before_deadline_buffer: int = 1    # stop scheduling within N days of deadline
-    n_weeks: Optional[int] = 2
-
+    max_consecutive_slots: int = 4          # max number of back-to-back study slots for the same assignment (so 2 hours by default)
 
 # ---------------------------------------------------------------------------
 # Scheduler
@@ -219,17 +218,33 @@ class Scheduler:
             free_slots = self._find_free_slots(blocked, now, latest_dt)
 
             slots_placed = 0
+            consecutive_slots = 0
+            prev_slot_end: Optional[datetime] = None
             for slot_start, slot_end in free_slots:
                 if assignment.remaining_slots == 0:
                     break
+
+                if prev_slot_end == slot_start:
+                    consecutive_slots += 1
+                else:
+                    consecutive_slots = 1
+                prev_slot_end = slot_end
+
+                ## If been going for more than max_consecutive_slots, take a break
+                if consecutive_slots > self.config.max_consecutive_slots:
+                    consecutive_slots = 0
+                    prev_slot_end = None
+                    continue
 
                 # Check daily cap
                 day = slot_start.date()
                 day_minutes = self._scheduled_minutes_on_day(
                     new_study_blocks, day
                 )
-                max_day_minutes = int(self.config.max_daily_study_hours * 60)
+                max_day_minutes = int(self.config.max_study_hours_by_week[day.weekday()] * 60)
                 if day_minutes >= max_day_minutes:
+                    consecutive_slots = 0
+                    prev_slot_end = None
                     continue
 
                 # Clamp slot to daily cap
@@ -238,6 +253,8 @@ class Scheduler:
                     max_day_minutes - day_minutes,
                 )
                 if available < self.config.slot_minutes:
+                    consecutive_slots = 0
+                    prev_slot_end = None
                     continue   # not enough room for a full slot on this day
 
                 study_block = TimeBlock(
@@ -778,7 +795,7 @@ def _demo() -> None:
     config = SchedulerConfig(
         slot_minutes=30,
         min_gap_minutes=10,
-        max_daily_study_hours=5.0,
+        max_study_hours_by_week=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], # 5 hours per day
         preferred_study_start=time(8, 0),
         preferred_study_end=time(22, 30),
         days_before_deadline_buffer=0,

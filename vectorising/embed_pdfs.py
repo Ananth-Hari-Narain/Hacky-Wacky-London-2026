@@ -37,8 +37,8 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 MONGODB_URI = os.environ["MONGODB_URI"]
-MONGODB_DB = os.getenv("MONGODB_DB", "learning_engine")
-MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "curriculum_chunks")
+MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536  # text-embedding-3-small output dimension

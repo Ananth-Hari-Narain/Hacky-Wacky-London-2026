@@ -64,3 +64,43 @@ Username: GitHub username
 Password: paste your PAT
 
 Your system will usually save it automatically.
+
+
+
+### IDEAS:
+
+# 🎓 Project MVP: Adaptive Learning & Scheduling Engine
+
+A high-fidelity, gamified revision and scheduling platform that leverages a Vector DB and student performance history to maximize learning efficiency per unit of time.
+
+---
+
+## 🚀 Core Features
+
+### 🧠 1. Revision Mode (The Problem Selector)
+The system acts as an automated private tutor by knowing exactly what you need to work on.
+* **Performance-Based Selection:** Automatically SELECTs the problem that maximizes your "learning per unit time" based on your history and topic mastery.
+* **Submission & Feedback:** Upload your solutions for automatic marking. The system provides feedback and updates your strengths/weaknesses profile.
+* **Synthetic Problem Generation:** If you run out of official practice questions, the AI generates similar problems targeting your specific weak areas.
+* **Full Context Access:** The engine has RAG access to all lecture notes, mark schemes, and examiner reports.
+* **GAMIFIED:** Built-in mechanics to keep engagement high through progression and rewards.
+
+### 📅 2. "Daily" Mode & Dynamic Scheduling
+A living calendar designed to adapt to the reality of student life.
+* **2-Week Rolling Calendar:** Visualizes your upcoming workload and focus areas.
+* **Global Context Overrides:** Large text box for broad changes (e.g., "I have a trip planned this weekend," or "I'm skipping lectures today").
+* **Event-Specific Notes:** Small text boxes for each event to provide the scheduler with extra nuance.
+* **Curriculum Sync:** Dedicated text boxes for every lecture to track exactly what content has been reached, ensuring the schedule stays tailored to your actual progress.
+
+---
+
+## 🏗️ Vector DB Architecture
+
+The system utilizes a dual-layer Vector Database approach to balance static curriculum data with dynamic user performance.
+
+### A. Centralized Curriculum (Global)
+* **Official Papers:** All past papers, mark schemes, and examiner reports.
+* **Practice Sets:** All problem sheets and solutions (e.g., PMT resources).
+* **Course Material:** All lecture notes for every module.
+
+### B. Per-User Data

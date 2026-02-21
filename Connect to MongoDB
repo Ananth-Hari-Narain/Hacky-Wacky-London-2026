@@ -1,8 +1,8 @@
-Run:
+# Run:
 
-python -m pip install "pymongo[srv]"
+# python -m pip install "pymongo[srv]"
 
-then run the following code:
+# then run the following code:
 
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi

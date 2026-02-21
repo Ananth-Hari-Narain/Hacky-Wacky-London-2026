@@ -140,8 +140,6 @@ class SchedulerConfig:
     preferred_study_start: time = time(9, 0)
     preferred_study_end: time = time(22, 0)
     days_before_deadline_buffer: int = 1    # stop scheduling within N days of deadline
-    # Scheduling strategy: "earliest_first" or "spread"
-    strategy: str = "spread"
     n_weeks: Optional[int] = 2
 
 
@@ -219,9 +217,6 @@ class Scheduler:
             )
 
             free_slots = self._find_free_slots(blocked, now, latest_dt)
-
-            if self.config.strategy == "spread":
-                free_slots = self._spread_slots(free_slots, now, latest_dt)
 
             slots_placed = 0
             for slot_start, slot_end in free_slots:
@@ -488,6 +483,156 @@ class ScheduleResult:
                 for a, missing in self.unscheduled_assignments
             ],
         }
+    
+    def display_timetable(
+    self,
+    timetable_blocks: list[TimeBlock],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    ) -> str:
+        """
+        Display the student's full timetable (existing blocks + newly scheduled
+        study sessions) in a readable day-by-day format.
+
+        Parameters
+        ----------
+        timetable_blocks:
+            The original fixed blocks passed into the scheduler.
+        start_date:
+            First day to display. Defaults to the earliest block found.
+        end_date:
+            Last day to display. Defaults to the latest block found.
+        """
+        all_blocks = timetable_blocks + self.new_study_blocks
+
+        if not all_blocks:
+            return "No blocks to display."
+
+        # --- determine date range ---
+        if start_date is None:
+            start_date = min(b.start.date() for b in all_blocks)
+        if end_date is None:
+            end_date = max(b.end.date() for b in all_blocks)
+
+        # --- colour / icon map per block type ---
+        ICONS = {
+            BlockType.LECTURE:       "📚",
+            BlockType.SEMINAR:       "🗣 ",
+            BlockType.LAB:           "🔬",
+            BlockType.SOCIETY:       "🎭",
+            BlockType.SLEEP:         "😴",
+            BlockType.SPORT:         "🏃",
+            BlockType.WORK:          "💼",
+            BlockType.PERSONAL:      "🧍",
+            BlockType.STUDY_SESSION: "✏️ ",
+            BlockType.OTHER:         "📌",
+        }
+
+        BLOCK_WIDTH = 60   # total width of the timetable display
+
+        def separator(char: str = "─") -> str:
+            return char * BLOCK_WIDTH
+
+        def centre(text: str) -> str:
+            return text.center(BLOCK_WIDTH)
+
+        def format_block(block: TimeBlock) -> str:
+            icon = ICONS.get(block.block_type, "📌")
+            time_str = (
+                f"{block.start.strftime('%H:%M')} – {block.end.strftime('%H:%M')}"
+                f"  ({block.duration_minutes}min)"
+            )
+            title_line = f"  {icon} {block.title}"
+            time_line  = f"     {time_str}"
+
+            lines = [title_line, time_line]
+
+            if block.attended is not None:
+                attended_str = "Attended: ✓" if block.attended else "Attended: ✗"
+                lines.append(f"     {attended_str}")
+
+            if block.notes and block.block_type != BlockType.STUDY_SESSION:
+                # Wrap notes at (BLOCK_WIDTH - 6) chars
+                words = block.notes.split()
+                note_lines: list[str] = []
+                current = "     📝 "
+                for word in words:
+                    if len(current) + len(word) + 1 <= BLOCK_WIDTH - 1:
+                        current += word + " "
+                    else:
+                        note_lines.append(current.rstrip())
+                        current = "        " + word + " "
+                note_lines.append(current.rstrip())
+                lines.extend(note_lines)
+
+            return "\n".join(lines)
+
+        # --- build output ---
+        lines: list[str] = []
+        lines.append(separator("═"))
+        lines.append(centre("  STUDENT TIMETABLE"))
+        lines.append(separator("═"))
+
+        current_date = start_date
+        while current_date <= end_date:
+            # All blocks that START on this day, sorted by start time
+            day_blocks = sorted(
+                [b for b in all_blocks if b.start.date() == current_date],
+                key=lambda b: b.start,
+            )
+
+            # Day header
+            day_str = current_date.strftime("%A  %d %B %Y")
+            lines.append("")
+            lines.append(centre(f"┌── {day_str} ──┐"))
+            lines.append(separator())
+
+            if not day_blocks:
+                lines.append(centre("(no blocks)"))
+            else:
+                # Detect gaps between blocks so free time is visible
+                prev_end: Optional[datetime] = None
+                for block in day_blocks:
+                    if prev_end is not None and block.start > prev_end:
+                        gap_minutes = int((block.start - prev_end).total_seconds() / 60)
+                        if gap_minutes >= 30:   # only show gaps worth mentioning
+                            gap_str = (
+                                f"  · · · free  "
+                                f"{prev_end.strftime('%H:%M')} – "
+                                f"{block.start.strftime('%H:%M')} "
+                                f"({gap_minutes}min)"
+                            )
+                            lines.append(gap_str)
+
+                    lines.append(format_block(block))
+                    lines.append(separator("·"))
+                    prev_end = block.end
+
+            # Daily study session summary
+            study_blocks = [
+                b for b in day_blocks if b.block_type == BlockType.STUDY_SESSION
+            ]
+            if study_blocks:
+                total_study = sum(b.duration_minutes for b in study_blocks)
+                lines.append(
+                    f"  📊 Study sessions today: {len(study_blocks)} "
+                    f"× {self.new_study_blocks[0].duration_minutes}min "
+                    f"= {total_study}min total"
+                )
+                lines.append(separator())
+
+            current_date += timedelta(days=1)
+
+        # --- legend ---
+        lines.append("")
+        lines.append(separator("═"))
+        lines.append(centre("LEGEND"))
+        lines.append(separator("─"))
+        for block_type, icon in ICONS.items():
+            lines.append(f"  {icon}  {block_type.value.replace('_', ' ').title()}")
+        lines.append(separator("═"))
+
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +675,6 @@ def make_assignment(
         priority=priority,
         description=description,
     )
-
 
 # ---------------------------------------------------------------------------
 # Demo / smoke test
@@ -638,7 +782,6 @@ def _demo() -> None:
         preferred_study_start=time(8, 0),
         preferred_study_end=time(22, 30),
         days_before_deadline_buffer=0,
-        strategy="spread",
     )
 
     scheduler = Scheduler(config)
@@ -649,17 +792,7 @@ def _demo() -> None:
     )
 
     print(result.summary())
-
-    # Show JSON-serialisable dict (trimmed for readability)
-    import json
-    data = result.to_dict()
-    print("\n  JSON preview (first assignment sessions):")
-    first = data["assignments"][0]
-    print(json.dumps(
-        {k: first[k] for k in ("title", "module_code", "estimated_minutes",
-                                "scheduled_minutes", "is_fully_scheduled", "sessions")},
-        indent=4,
-    ))
+    print(result.display_timetable(timetable_blocks=timetable))
 
 
 if __name__ == "__main__":

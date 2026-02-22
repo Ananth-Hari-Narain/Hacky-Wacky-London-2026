@@ -96,7 +96,6 @@ from marking.db import (
     create_chat_session,
 )
 from marking.vision_grader import grade_image_answer
-from marking.annotator import annotate_image
 from marking.rag import search_chunks
 from marking.chat import get_ai_reply, get_chat_history
 
@@ -470,6 +469,15 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
             "rather than an official model solution."
         )
 
+    # Debug: log what's being sent to the grader
+    print(f"[GRADING] problem={problem_id}")
+    print(f"[GRADING] question_text length={len(question_text)}")
+    print(f"[GRADING] solution_text length={len(solution_text)} (raw from DB)")
+    print(f"[GRADING] grading_solution length={len(grading_solution)}")
+    print(f"[GRADING] rag_context length={len(rag_context)}")
+    if not solution_text.strip():
+        print(f"[GRADING] WARNING: No solution_text in DB — using RAG fallback")
+
     grade_result = grade_image_answer(
         image_base64=req.image_base64,
         question_text=question_text,
@@ -477,16 +485,7 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         rag_context=rag_context if solution_text.strip() else "",
     )
 
-    # ── 5. Annotate image ────────────────────────────────────────────────────
-    try:
-        annotated_b64 = annotate_image(
-            req.image_base64,
-            grade_result.get("annotations", []),
-        )
-    except Exception:
-        annotated_b64 = req.image_base64  # fallback to original
-
-    # ── 6. Score normalisation + user vector update ──────────────────────────
+    # ── 5. Score normalisation + user vector update ──────────────────────────
     raw_score = float(grade_result.get("score", 0))
     max_score = float(grade_result.get("max_score", 10))
     correctness = raw_score / max_score if max_score > 0 else 0.0
@@ -518,14 +517,8 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         db["users"].update_one({"user_id": req.user_id}, update_fields)
         vector_updated = True
 
-    # ── 7. Convert annotated image to bytes for DB storage ──────────────────
-    try:
-        annotated_bytes = base64.b64decode(annotated_b64)
-    except Exception:
-        annotated_bytes = None
-
-    # ── 8. Persist submission + create chat session ──────────────────────────
-    sub_doc = {
+    # ── 7. Persist submission + create chat session ──────────────────────────
+    submission_id = save_image_submission({
         "user_id":          req.user_id,
         "question_id":      problem_id,
         "question_text":    question_text,
@@ -536,15 +529,8 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         "hints_used":       hints_used,
         "attempt":          req.attempt,
         "vector_updated":   vector_updated,
-        "annotated_image":  annotated_bytes,
         "created_at":       datetime.now(timezone.utc),
-    }
-    try:
-        submission_id = save_image_submission(sub_doc)
-    except Exception:
-        # Image too large for BSON — retry without the image bytes
-        sub_doc.pop("annotated_image", None)
-        submission_id = save_image_submission(sub_doc)
+    })
 
     session_id = create_chat_session({
         "user_id":       req.user_id,
@@ -584,8 +570,6 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         "areas_for_improvement": grade_result.get("areas_for_improvement", []),
         "annotations":           grade_result.get("annotations", []),
         "transcription":         grade_result.get("transcription", ""),
-        # Image URLs (open in browser to view)
-        "annotated_image_url":   f"/submission/{submission_id}/annotated-image",
         "solution_image_url":    f"/problem/{problem_id}/solution-image",
         "solution_text":         solution_text,
     }

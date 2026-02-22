@@ -188,12 +188,8 @@
     <h2 style="margin-top:20px;">Annotations</h2>
     <div class="annotation-list" id="annotationList"></div>
 
-    <!-- Images -->
+    <!-- Solution image only -->
     <div class="images-row" id="imagesRow">
-      <div>
-        <div class="img-label">Your annotated answer</div>
-        <img id="annotatedImg" alt="Annotated answer" />
-      </div>
       <div>
         <div class="img-label">Model solution</div>
         <img id="solutionImg" alt="Solution" />
@@ -427,11 +423,7 @@ function showResults(data) {
       </div>`;
   });
 
-  // Images (click to open full-size in new tab)
-  const annImg = document.getElementById('annotatedImg');
-  annImg.src = `${API}${data.annotated_image_url}`;
-  annImg.onclick = () => window.open(annImg.src, '_blank');
-
+  // Solution image (click to open full-size in new tab)
   const solImg = document.getElementById('solutionImg');
   solImg.src = `${API}${data.solution_image_url}`;
   solImg.onclick = () => window.open(solImg.src, '_blank');

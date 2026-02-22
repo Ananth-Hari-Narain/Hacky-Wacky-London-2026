@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from api.routers import chat, grading, problems, questions, upload, users
+from api.routers import chat, grading, problems, questions, schedule, upload, users
 
 app = FastAPI(title="Adaptive Learning Engine")
 
@@ -27,6 +27,7 @@ app.include_router(upload.router)
 app.include_router(users.router)
 app.include_router(chat.router)
 app.include_router(questions.router)
+app.include_router(schedule.router)
 
 _static_dir = Path(__file__).resolve().parent / "static"
 

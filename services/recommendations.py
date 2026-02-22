@@ -162,6 +162,11 @@ def build_problem_vectors():
     if not questions:
         return 0
 
+    valid_ids = [q["_id"] for q in questions]
+
+    # Remove any stale entries that no longer correspond to a question
+    pv_coll.delete_many({"problem_id": {"$nin": valid_ids}})
+
     ops = [
         UpdateOne(
             {"problem_id": q["_id"]},

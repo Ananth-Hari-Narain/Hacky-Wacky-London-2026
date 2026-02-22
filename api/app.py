@@ -446,18 +446,35 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         raise HTTPException(400, "No question text available for this problem.")
 
     # ── 3. RAG context from ingested PDFs ────────────────────────────────────
+    # Search ALL available collections for maximum context
     rag_context = search_chunks(
-        query=question_text,
-        collections=["solution_chunks", "notes_chunks"],
-        top_k=3,
+        query=question_text + " " + solution_text[:200],
+        collections=["solution_chunks", "notes_chunks", MONGODB_COLLECTION],
+        top_k=5,
     )
 
     # ── 4. Vision grading ────────────────────────────────────────────────────
+    # If no solution text, use RAG context as the solution reference
+    grading_solution = solution_text
+    if not grading_solution.strip():
+        grading_solution = (
+            "[NO OFFICIAL SOLUTION AVAILABLE]\n"
+            "Use the lecture notes context below as your primary reference for "
+            "correct answers. Apply your expert CS knowledge to determine "
+            "correctness, but be transparent about the lack of a model solution.\n\n"
+            f"RELEVANT REFERENCE MATERIAL:\n{rag_context}"
+        ) if rag_context else (
+            "[NO OFFICIAL SOLUTION OR NOTES AVAILABLE]\n"
+            "Use your expert computer science knowledge to grade this answer. "
+            "Be transparent that you are grading based on standard CS theory "
+            "rather than an official model solution."
+        )
+
     grade_result = grade_image_answer(
         image_base64=req.image_base64,
         question_text=question_text,
-        solution_text=solution_text,
-        rag_context=rag_context,
+        solution_text=grading_solution,
+        rag_context=rag_context if solution_text.strip() else "",
     )
 
     # ── 5. Annotate image ────────────────────────────────────────────────────

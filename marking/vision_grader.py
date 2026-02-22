@@ -73,8 +73,21 @@ review, a concrete study tip, and how to approach similar problems in future."
   ]
 }
 
-## CRITICAL Rules:
+## CRITICAL Rules — ACCURACY IS PARAMOUNT:
 
+- NEVER guess or invent answers. Your grading MUST be grounded in:
+  1. The MODEL SOLUTION (primary authority — if provided, this is the definitive answer)
+  2. The LECTURE NOTES context (secondary authority — use for theory and definitions)
+  3. ONLY if neither is available, use standard CS theory, but explicitly state: \
+     "Based on standard CS theory..." to be transparent.
+- If the model solution shows something different from what the student wrote, the \
+  model solution is CORRECT unless it is clearly a typo or formatting artifact.
+- NEVER mark a student's answer as wrong unless you can cite the model solution or \
+  lecture notes to justify why it is wrong.
+- NEVER mark a student's answer as correct just because it "looks reasonable" — \
+  verify against the model solution step by step.
+
+## Output rules:
 - y_position: 0.0 = very top of image, 1.0 = very bottom. Place annotations at the \
   EXACT vertical position where that part of the student's answer appears.
 - type: MUST be one of: correct, error, missing, suggestion
@@ -86,9 +99,9 @@ review, a concrete study tip, and how to approach similar problems in future."
 - areas_for_improvement: 3-5 detailed points (2-3 sentences each) with specific study advice.
 - For MISSING parts (anything in the model solution the student didn't attempt), \
   create a "missing" annotation explaining what was expected and how to derive it.
-- ALWAYS reference the model solution explicitly ("The model solution shows...").
-- ALWAYS reference lecture note concepts when available ("According to the lecture notes...").
-- Be encouraging but honest. Students learn best from thorough explanations.
+- ALWAYS quote from the model solution explicitly ("The model solution shows...").
+- ALWAYS cite lecture notes where relevant ("According to the lecture notes...").
+- Be encouraging but honest. Students learn best from thorough, accurate explanations.
 """
 
 
@@ -121,9 +134,12 @@ def grade_image_answer(
             "type": "text",
             "text": (
                 f"QUESTION:\n{question_text}\n\n"
-                f"MODEL SOLUTION:\n{solution_text}"
+                f"MODEL SOLUTION (this is the CORRECT answer — grade against this):\n"
+                f"{solution_text}"
                 f"{context_section}\n\n"
-                "Please analyse the student's answer image below and grade it."
+                "IMPORTANT: Grade the student's answer image below STRICTLY against "
+                "the model solution above. Every claim of correct/incorrect MUST be "
+                "verifiable from the model solution or lecture notes. Do NOT guess."
             ),
         },
         {

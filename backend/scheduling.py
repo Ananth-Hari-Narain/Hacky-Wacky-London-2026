@@ -39,6 +39,11 @@ class Priority(Enum):
     CRITICAL = 4
 
 
+class SchedulingStrategy(Enum):
+    ASAP = "asap"
+    SPREAD_OUT = "spread_out"
+
+
 # ---------------------------------------------------------------------------
 # Core Data Models
 # ---------------------------------------------------------------------------
@@ -141,6 +146,7 @@ class SchedulerConfig:
     preferred_study_end: time = time(22, 0)
     days_before_deadline_buffer: int = 1    # stop scheduling within N days of deadline
     max_consecutive_slots: int = 4          # max number of back-to-back study slots for the same assignment (so 2 hours by default)
+    strategy: SchedulingStrategy = SchedulingStrategy.ASAP
 
 # ---------------------------------------------------------------------------
 # Scheduler
@@ -216,6 +222,8 @@ class Scheduler:
             )
 
             free_slots = self._find_free_slots(blocked, now, latest_dt)
+            if self.config.strategy == SchedulingStrategy.SPREAD_OUT:
+                free_slots = self._spread_slots(free_slots, now, latest_dt)
 
             slots_placed = 0
             consecutive_slots = 0
@@ -337,7 +345,8 @@ class Scheduler:
         """
         Re-order slots so they are distributed across the available date range
         rather than front-loaded, to encourage a healthy spread of study.
-        Implements a simple interleaving: pick one slot per day in round-robin.
+        Uses day-by-day round-robin in small contiguous chunks to avoid
+        over-fragmenting sessions.
         """
         if not slots:
             return slots
@@ -347,14 +356,24 @@ class Scheduler:
         for s, e in slots:
             day_buckets[s.date()].append((s, e))
 
-        # Interleave day by day
+        # Interleave day by day with small per-day batches to keep flow.
         sorted_days = sorted(day_buckets.keys())
+        chunk_size = max(1, min(2, self.config.max_consecutive_slots))
+        day_offsets: dict[date, int] = {d: 0 for d in sorted_days}
         result: list[tuple[datetime, datetime]] = []
-        max_per_day = max(len(v) for v in day_buckets.values())
-        for i in range(max_per_day):
+        while True:
+            added_any = False
             for d in sorted_days:
-                if i < len(day_buckets[d]):
-                    result.append(day_buckets[d][i])
+                bucket = day_buckets[d]
+                offset = day_offsets[d]
+                if offset >= len(bucket):
+                    continue
+                end_offset = min(offset + chunk_size, len(bucket))
+                result.extend(bucket[offset:end_offset])
+                day_offsets[d] = end_offset
+                added_any = True
+            if not added_any:
+                break
         return result
 
     def _align_to_slot(self, dt: datetime) -> datetime:
@@ -799,6 +818,7 @@ def _demo() -> None:
         preferred_study_start=time(8, 0),
         preferred_study_end=time(22, 30),
         days_before_deadline_buffer=0,
+        strategy=SchedulingStrategy.SPREAD_OUT,
     )
 
     scheduler = Scheduler(config)

@@ -107,6 +107,28 @@
   .takeaways { background: #1a2a3a; border: 1px solid #2a4a5a; border-radius: 8px; padding: 14px; margin-top: 12px; }
   .takeaways h3 { font-size: 14px; color: #60a5fa; margin-bottom: 8px; }
   .takeaways li { font-size: 13px; color: #c4c4cc; margin-bottom: 4px; }
+
+  /* Tab navigation */
+  .tab-bar { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 2px solid #2a2d3a; }
+  .tab-btn { background: none; color: #8888a0; border: none; padding: 12px 24px; font-size: 15px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+  .tab-btn:hover { color: #c4c4cc; }
+  .tab-btn.active { color: #6366f1; border-bottom-color: #6366f1; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Practice questions */
+  .gen-item { background: #1e2030; border: 1px solid #2a2d3a; border-radius: 10px; padding: 16px; cursor: pointer; transition: border-color 0.2s; margin-bottom: 12px; }
+  .gen-item:hover { border-color: #6366f1; }
+  .gen-item.active { border-color: #6366f1; background: #1e1e3a; }
+  .gen-item .gen-label { font-size: 15px; font-weight: 600; color: #e1e1e6; }
+  .gen-item .gen-preview { font-size: 13px; color: #8888a0; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .gen-badge { display: inline-block; background: #4f46e5; color: white; border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; margin-left: 8px; }
+  .generate-btn { background: #4f46e5; color: white; border: none; border-radius: 8px; padding: 10px 22px; font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 16px; transition: background 0.2s; }
+  .generate-btn:hover { background: #4338ca; }
+  .generate-btn:disabled { background: #3a3d4a; cursor: not-allowed; }
+
+  /* Question text display (for generated questions without images) */
+  .question-text-display { background: #1e2030; border: 1px solid #2a2d3a; border-radius: 8px; padding: 20px; font-size: 14px; line-height: 1.7; color: #e1e1e6; white-space: pre-wrap; margin-bottom: 16px; display: none; }
 </style>
 </head>
 <body>
@@ -120,36 +142,67 @@
 </div>
 
 <div class="container">
-  <!-- User Profile -->
-  <div class="card" id="profileCard" style="display:none;">
-    <h2 id="profileName"></h2>
-    <div class="profile-grid">
-      <div>
-        <div style="font-size:13px; color:#8888a0; margin-bottom:6px;">Top Strengths</div>
-        <div id="strengths"></div>
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('recommended')">Recommended</button>
+    <button class="tab-btn" onclick="switchTab('practice')">Practice Questions</button>
+  </div>
+
+  <!-- Tab 1: Recommended (existing content) -->
+  <div class="tab-content active" id="tab-recommended">
+    <!-- User Profile -->
+    <div class="card" id="profileCard" style="display:none;">
+      <h2 id="profileName"></h2>
+      <div class="profile-grid">
+        <div>
+          <div style="font-size:13px; color:#8888a0; margin-bottom:6px;">Top Strengths</div>
+          <div id="strengths"></div>
+        </div>
+        <div>
+          <div style="font-size:13px; color:#8888a0; margin-bottom:6px;">Top Weaknesses</div>
+          <div id="weaknesses"></div>
+        </div>
       </div>
-      <div>
-        <div style="font-size:13px; color:#8888a0; margin-bottom:6px;">Top Weaknesses</div>
-        <div id="weaknesses"></div>
-      </div>
+    </div>
+
+    <!-- Recommendations -->
+    <div class="card" id="recCard" style="display:none;">
+      <h2>Recommended Questions</h2>
+      <div class="rec-list" id="recList"></div>
     </div>
   </div>
 
-  <!-- Recommendations -->
-  <div class="card" id="recCard" style="display:none;">
-    <h2>Recommended Questions</h2>
-    <div class="rec-list" id="recList"></div>
+  <!-- Tab 2: Practice Questions (new) -->
+  <div class="tab-content" id="tab-practice">
+    <div class="card">
+      <h2>AI-Generated Practice Questions</h2>
+      <p style="font-size:13px; color:#8888a0; margin-bottom:16px;">
+        Generate new practice questions based on your uploaded exam papers and lecture notes.
+      </p>
+      <button class="generate-btn" id="generateBtn" onclick="generateQuestions()">Generate 3 Questions</button>
+      <div class="spinner" id="generateSpinner"></div>
+      <div id="genList"></div>
+      <p id="genEmpty" style="font-size:14px; color:#8888a0; display:none;">
+        No practice questions yet. Click "Generate" to create some!
+      </p>
+    </div>
   </div>
 
-  <!-- Question View -->
+  <!-- Question View (shared between both tabs) -->
   <div class="card question-view" id="questionCard">
     <h2 id="questionTitle"></h2>
+    <div class="question-text-display" id="questionText"></div>
     <img class="question-img" id="questionImg" alt="Question" />
     <div id="hintsArea">
       <button class="hint-btn" onclick="getHint(1)">Hint 1 (gentle)</button>
       <button class="hint-btn" onclick="getHint(2)">Hint 2 (moderate)</button>
       <button class="hint-btn" onclick="getHint(3)">Hint 3 (specific)</button>
+      <button class="hint-btn" id="showSolutionBtn" onclick="toggleSolution()" style="display:none; background:#4f46e5; color:white;">Show Solution</button>
       <div class="hint-box" id="hintBox"></div>
+      <div id="solutionPreview" style="display:none; margin-top:16px;">
+        <div style="font-size:13px; color:#8888a0; margin-bottom:8px; font-weight:600;">Model Solution</div>
+        <img class="question-img" id="solutionPreviewImg" alt="Model Solution" />
+      </div>
     </div>
 
     <!-- Upload -->
@@ -221,6 +274,8 @@ let currentProblem = null;
 let currentFile = null;
 let sessionId = null;
 let attempt = 1;
+let currentHints = null;
+let currentIsGenerated = false;
 
 // ── Init ──────────────────────────────────────────────────────────────────
 async function init() {
@@ -292,6 +347,8 @@ async function selectProblem(pid, el) {
   document.querySelectorAll('.rec-item').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   currentProblem = pid;
+  currentHints = null;
+  currentIsGenerated = false;
 
   // Reset
   document.getElementById('resultsCard').classList.remove('visible');
@@ -299,6 +356,8 @@ async function selectProblem(pid, el) {
   document.getElementById('hintBox').classList.remove('visible');
   document.getElementById('uploadPreview').style.display = 'none';
   document.getElementById('submitBtn').disabled = true;
+  document.getElementById('showSolutionBtn').style.display = 'none';
+  document.getElementById('solutionPreview').style.display = 'none';
   currentFile = null;
   attempt = 1;
 
@@ -306,13 +365,29 @@ async function selectProblem(pid, el) {
   const prob = await res.json();
 
   document.getElementById('questionTitle').textContent = `${prob.source} — ${prob.question}`;
+  document.getElementById('questionText').style.display = 'none';
+  document.getElementById('questionImg').style.display = 'block';
   document.getElementById('questionImg').src = `${API}/problem/${pid}/image`;
   document.getElementById('questionCard').classList.add('visible');
 }
 
 // ── Hints ─────────────────────────────────────────────────────────────────
 async function getHint(n) {
-  if (!currentProblem || !currentUser) return;
+  if (!currentProblem) return;
+
+  // Use cached hints for generated questions (no user/API call needed)
+  if (currentHints && currentHints.length >= n) {
+    const box = document.getElementById('hintBox');
+    box.textContent = `Hint ${n}: ${currentHints[n - 1]}`;
+    box.classList.add('visible');
+    return;
+  }
+
+  if (!currentUser) {
+    alert('Please select a student first to use hints.');
+    return;
+  }
+
   const res = await fetch(`${API}/problem/${currentProblem}/hint`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -353,7 +428,11 @@ function handleFile(file) {
 
 // ── Submit answer ─────────────────────────────────────────────────────────
 async function submitAnswer() {
-  if (!currentFile || !currentProblem || !currentUser) return;
+  if (!currentFile || !currentProblem) return;
+  if (!currentUser) {
+    alert('Please select a student first to submit an answer.');
+    return;
+  }
   const btn = document.getElementById('submitBtn');
   const spinner = document.getElementById('submitSpinner');
   btn.disabled = true;
@@ -485,6 +564,130 @@ async function sendChat() {
     .replace(/\n/g, '<br>');
   messages.innerHTML += `<div class="chat-msg ai">${reply}</div>`;
   messages.scrollTop = messages.scrollHeight;
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────
+function switchTab(tabName) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+
+  document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+  document.getElementById(`tab-${tabName}`).classList.add('active');
+
+  // Hide question/results/chat when switching tabs
+  document.getElementById('questionCard').classList.remove('visible');
+  document.getElementById('resultsCard').classList.remove('visible');
+  document.getElementById('chatCard').classList.remove('visible');
+
+  if (tabName === 'practice') {
+    loadGeneratedQuestions();
+  }
+}
+
+// ── Load generated questions ──────────────────────────────────────────
+async function loadGeneratedQuestions() {
+  const res = await fetch(`${API}/questions/generated`);
+  const data = await res.json();
+
+  const list = document.getElementById('genList');
+  const empty = document.getElementById('genEmpty');
+  list.innerHTML = '';
+
+  if (data.questions.length === 0) {
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  data.questions.forEach(q => {
+    const div = document.createElement('div');
+    div.className = 'gen-item';
+    div.innerHTML = `
+      <div class="gen-label">${q.question} <span class="gen-badge">AI Generated</span></div>
+      <div class="gen-preview">${q.text.substring(0, 200)}...</div>
+    `;
+    div.onclick = () => selectGeneratedProblem(q.problem_id, q, div);
+    list.appendChild(div);
+  });
+}
+
+// ── Select a generated problem ─────────────────────────────────────────
+function selectGeneratedProblem(pid, questionData, el) {
+  document.querySelectorAll('.gen-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  currentProblem = pid;
+  currentHints = questionData.hints || null;
+  currentIsGenerated = true;
+
+  // Reset
+  document.getElementById('resultsCard').classList.remove('visible');
+  document.getElementById('chatCard').classList.remove('visible');
+  document.getElementById('hintBox').classList.remove('visible');
+  document.getElementById('uploadPreview').style.display = 'none';
+  document.getElementById('submitBtn').disabled = true;
+  document.getElementById('solutionPreview').style.display = 'none';
+  currentFile = null;
+  attempt = 1;
+
+  // Show image just like regular questions (generated questions now have rendered images)
+  document.getElementById('questionTitle').textContent = questionData.question + ' (AI Generated)';
+  document.getElementById('questionText').style.display = 'none';
+  document.getElementById('questionImg').style.display = 'block';
+  document.getElementById('questionImg').src = `${API}/problem/${pid}/image`;
+
+  // Show solution toggle for generated questions (they always have solutions)
+  const solBtn = document.getElementById('showSolutionBtn');
+  if (questionData.has_solution) {
+    solBtn.style.display = 'inline-block';
+    solBtn.textContent = 'Show Solution';
+  } else {
+    solBtn.style.display = 'none';
+  }
+
+  document.getElementById('questionCard').classList.add('visible');
+}
+
+// ── Generate new questions ─────────────────────────────────────────────
+async function generateQuestions() {
+  const btn = document.getElementById('generateBtn');
+  const spinner = document.getElementById('generateSpinner');
+  btn.disabled = true;
+  spinner.classList.add('visible');
+
+  try {
+    const res = await fetch(`${API}/questions/generate`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ count: 3 })
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      alert('Generation failed: ' + (data.detail || 'Unknown error'));
+      return;
+    }
+
+    await loadGeneratedQuestions();
+  } catch (err) {
+    alert('Error generating questions: ' + err.message);
+  } finally {
+    spinner.classList.remove('visible');
+    btn.disabled = false;
+  }
+}
+
+// ── Toggle solution for practice questions ────────────────────────────
+function toggleSolution() {
+  const preview = document.getElementById('solutionPreview');
+  const btn = document.getElementById('showSolutionBtn');
+  if (preview.style.display === 'none') {
+    document.getElementById('solutionPreviewImg').src = `${API}/problem/${currentProblem}/solution-image`;
+    preview.style.display = 'block';
+    btn.textContent = 'Hide Solution';
+  } else {
+    preview.style.display = 'none';
+    btn.textContent = 'Show Solution';
+  }
 }
 
 init();

@@ -38,6 +38,7 @@ EXTRACT_TOPICS_MODEL = "gpt-4o-mini"
 VISION_MODEL = "gpt-4o"
 CHAT_MODEL = "gpt-4o"
 GRADER_MODEL = "gpt-4o"
+QUESTION_GEN_MODEL = "gpt-4o"
 
 # --- Pipeline tuning ---
 EMBED_BATCH_SIZE = 100

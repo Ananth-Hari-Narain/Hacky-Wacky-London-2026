@@ -216,9 +216,24 @@ def update_user_vector(
     problem_vector: list[float],
     final_score: float,
 ) -> list[float]:
+    """Update only the topics this question actually assesses.
+
+    For each topic where problem_vector[i] > 0.3 (meaningfully assessed):
+    - Move toward 1.0 on correct (final_score near 1.0)
+    - Move toward 0.0 on wrong (final_score near 0.0)
+    - Scale the step by topic relevance so a tangentially-related topic
+      shifts less than a core topic.
+    - Learning rate is small so one question is never decisive.
+    """
+    RELEVANCE_THRESHOLD = 0.3
     new_vector = list(user_vector)
     for i in range(len(new_vector)):
-        if problem_vector[i] > 0.1:
-            delta = LEARNING_RATE * final_score * problem_vector[i]
-            new_vector[i] = min(1.0, new_vector[i] + delta)
+        relevance = problem_vector[i]
+        if relevance <= RELEVANCE_THRESHOLD:
+            continue
+        # target: 1.0 if perfect, 0.0 if completely wrong
+        target = final_score
+        # step scaled by relevance and learning rate — gentle movement
+        step = LEARNING_RATE * relevance * (target - new_vector[i])
+        new_vector[i] = max(0.0, min(1.0, new_vector[i] + step))
     return [round(v, 4) for v in new_vector]

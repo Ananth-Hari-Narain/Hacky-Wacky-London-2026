@@ -106,24 +106,23 @@ def judge(problem_id: str, req: JudgeRequest):
         "attempt": req.attempt,
     }
 
+    problem_vector = doc.get("topic_vector", [])
+    user_vector = user.get("topic_vector", [])
+
+    if problem_vector and user_vector and len(problem_vector) == len(user_vector):
+        new_vector = update_user_vector(user_vector, problem_vector, final_score)
+        update_fields: dict = {
+            "$set": {
+                "topic_vector": new_vector,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        }
+        if is_complete:
+            update_fields["$addToSet"] = {"completed_problems": doc["_id"]}
+        users_coll().update_one({"user_id": req.user_id}, update_fields)
+        response_data["vector_updated"] = True
+
     if is_complete:
-        problem_vector = doc.get("topic_vector", [])
-        user_vector = user.get("topic_vector", [])
-
-        if problem_vector and user_vector and len(problem_vector) == len(user_vector):
-            new_vector = update_user_vector(user_vector, problem_vector, final_score)
-            users_coll().update_one(
-                {"user_id": req.user_id},
-                {
-                    "$set": {
-                        "topic_vector": new_vector,
-                        "updated_at": datetime.now(timezone.utc),
-                    },
-                    "$addToSet": {"completed_problems": doc["_id"]},
-                },
-            )
-            response_data["vector_updated"] = True
-
         response_data["key_takeaways"] = doc.get("key_takeaways", [])
 
     return response_data

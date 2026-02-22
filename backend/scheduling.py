@@ -711,6 +711,50 @@ def make_assignment(
         description=description,
     )
 
+
+def _populate_assignments(
+    user_id: str,
+    assignments: list[dict],
+) -> int:
+    """
+    Persist a batch of assignments to the database for a given user.
+
+    Each dict in *assignments* must have the following keys:
+        - ``name``              (str)      – the assignment name
+        - ``topic``             (str)      – the topic / module the assignment belongs to
+        - ``due_date``          (datetime) – when the assignment is due
+        - ``date_released``     (datetime) – when the assignment was released
+
+    Optional keys:
+        - ``strength_score``    (float)    – 0.0–1.0, defaults to 0.5
+        - ``duration_minutes``  (int)      – estimated duration, defaults to 240 (4 hours)
+
+    An ``assignment_id`` is generated automatically (UUID4) for every entry
+    that does not already carry one.
+
+    Returns
+    -------
+    int
+        Number of documents upserted / modified in the database.
+    """
+    import uuid as _uuid
+    from database.timetable_db import add_assignments
+
+    enriched: list[dict] = []
+    for a in assignments:
+        enriched.append({
+            "assignment_id": a.get("assignment_id", str(_uuid.uuid4())),
+            "name": a["name"],
+            "topic": a["topic"],
+            "due_date": a["due_date"],
+            "date_released": a["date_released"],
+            "strength_score": a.get("strength_score", 0.5),
+            "duration_minutes": a.get("duration_minutes", 240),
+        })
+
+    return add_assignments(user_id, enriched)
+
+
 # ---------------------------------------------------------------------------
 # Demo / smoke test
 # ---------------------------------------------------------------------------
@@ -1002,5 +1046,301 @@ def _demo() -> None:
     print("\n✓ Demo complete — all data persisted in MongoDB.")
 
 
+def _demo2() -> None:
+    """
+    Populate the database with a realistic, busy two-week timetable
+    (Sun 22 Feb 2026 – Sun 8 Mar 2026) for the demo user.
+
+    Covers: lectures, seminars, labs, societies, sport, part-time work,
+    sleep, meals, and a set of assignments.  Also runs the scheduler
+    to fill in study sessions.
+
+    Usage:
+        python -m backend.scheduling demo2
+    """
+    from database.timetable_db import (
+        add_blocks as db_add_blocks,
+        clear_generated_blocks,
+        get_user_schedule,
+        ensure_indexes,
+        _get_db,
+    )
+
+    DEMO_USER_ID = "demo-student-001"
+    ensure_indexes()
+
+    # Wipe previous data
+    db = _get_db()
+    db["timetable_blocks"].delete_many({"user_id": DEMO_USER_ID})
+    db["users"].update_one(
+        {"_id": DEMO_USER_ID},
+        {"$set": {"name": "Demo Student", "email": "demo@example.com"}},
+        upsert=True,
+    )
+    print("✓ Cleared previous demo data\n")
+
+    # ------------------------------------------------------------------
+    # Base date: Sunday 22 Feb 2026
+    # ------------------------------------------------------------------
+    sun22 = datetime(2026, 2, 22)
+
+    def dt(day_offset: int, hour: int, minute: int = 0) -> datetime:
+        return sun22 + timedelta(days=day_offset, hours=hour, minutes=minute)
+
+    # ------------------------------------------------------------------
+    # Helper: repeat a weekly pattern across both weeks
+    # ------------------------------------------------------------------
+    def weekly(day_of_week: int, h_start: int, m_start: int,
+               h_end: int, m_end: int, title: str,
+               bt: BlockType, notes: str | None = None,
+               attended: bool | None = None) -> list[TimeBlock]:
+        """day_of_week: 0=Sun(22 Feb), 1=Mon(23 Feb), … 6=Sat(28 Feb)"""
+        blocks: list[TimeBlock] = []
+        for week_offset in (0, 7):
+            d = day_of_week + week_offset
+            blocks.append(make_block(
+                title, bt,
+                dt(d, h_start, m_start), dt(d, h_end, m_end),
+                notes=notes, attended=attended,
+            ))
+        return blocks
+
+    timetable: list[TimeBlock] = []
+
+    # === SLEEP — every night 23:00 → 07:30 ============================
+    for d in range(15):  # day 0 (Sun 22) through day 14 (Sun 8 Mar)
+        timetable.append(make_block(
+            "Sleep", BlockType.SLEEP,
+            dt(d, 23, 0), dt(d + 1, 7, 30),
+        ))
+
+    # === MONDAY (days 1, 8) ============================================
+    timetable += weekly(1, 9, 0, 10, 0, "CS201 – Algorithms Lecture",
+                        BlockType.LECTURE, "Divide and conquer", True)
+    timetable += weekly(1, 10, 15, 11, 15, "MATH202 – Linear Algebra Lecture",
+                        BlockType.LECTURE, "Eigenvalues this week", True)
+    timetable += weekly(1, 11, 30, 12, 30, "CS201 – Algorithms Seminar",
+                        BlockType.SEMINAR)
+    timetable += weekly(1, 12, 30, 13, 15, "Lunch",
+                        BlockType.PERSONAL)
+    timetable += weekly(1, 14, 0, 16, 0, "CS201 – Programming Lab",
+                        BlockType.LAB)
+    timetable += weekly(1, 18, 0, 19, 30, "Football (5-a-side)",
+                        BlockType.SPORT)
+    timetable += weekly(1, 20, 0, 21, 0, "Dinner",
+                        BlockType.PERSONAL)
+
+    # === TUESDAY (days 2, 9) ===========================================
+    timetable += weekly(2, 9, 0, 10, 0, "PHYS301 – Quantum Mechanics Lecture",
+                        BlockType.LECTURE, "Schrödinger equation", True)
+    timetable += weekly(2, 10, 15, 11, 15, "ENG101 – Technical Writing Lecture",
+                        BlockType.LECTURE)
+    timetable += weekly(2, 11, 30, 12, 30, "ENG101 – Workshop",
+                        BlockType.SEMINAR)
+    timetable += weekly(2, 12, 30, 13, 15, "Lunch",
+                        BlockType.PERSONAL)
+    timetable += weekly(2, 13, 30, 14, 30, "MATH202 – Seminar",
+                        BlockType.SEMINAR)
+    timetable += weekly(2, 16, 0, 20, 0, "Part-time job (café)",
+                        BlockType.WORK)
+
+    # === WEDNESDAY (days 3, 10) ========================================
+    timetable += weekly(3, 9, 0, 10, 0, "CS201 – Algorithms Lecture",
+                        BlockType.LECTURE, "Dynamic programming")
+    timetable += weekly(3, 10, 15, 11, 15, "PHYS301 – Problem Class",
+                        BlockType.SEMINAR)
+    timetable += weekly(3, 12, 0, 13, 30, "Gym session",
+                        BlockType.SPORT)
+    timetable += weekly(3, 14, 0, 17, 0, "PHYS301 – Lab",
+                        BlockType.LAB, "Optics experiment")
+    timetable += weekly(3, 18, 0, 19, 30, "Chess Club",
+                        BlockType.SOCIETY)
+    timetable += weekly(3, 19, 30, 20, 15, "Dinner",
+                        BlockType.PERSONAL)
+
+    # === THURSDAY (days 4, 11) =========================================
+    timetable += weekly(4, 10, 0, 11, 0, "MATH202 – Lecture",
+                        BlockType.LECTURE, "Orthogonal matrices")
+    timetable += weekly(4, 11, 15, 12, 15, "CS201 – Guest Lecture",
+                        BlockType.LECTURE)
+    timetable += weekly(4, 12, 15, 13, 0, "Lunch",
+                        BlockType.PERSONAL)
+    timetable += weekly(4, 15, 0, 19, 0, "Part-time job (café)",
+                        BlockType.WORK)
+    timetable += weekly(4, 20, 0, 21, 30, "Debate Society",
+                        BlockType.SOCIETY)
+
+    # === FRIDAY (days 5, 12) ===========================================
+    timetable += weekly(5, 9, 0, 10, 0, "PHYS301 – Lecture",
+                        BlockType.LECTURE, "Angular momentum")
+    timetable += weekly(5, 10, 15, 11, 15, "CS201 – Seminar",
+                        BlockType.SEMINAR)
+    timetable += weekly(5, 11, 30, 12, 30, "ENG101 – Peer Review",
+                        BlockType.SEMINAR)
+    timetable += weekly(5, 12, 30, 14, 0, "Lunch with friends",
+                        BlockType.PERSONAL)
+    timetable += weekly(5, 14, 0, 15, 0, "MATH202 – Drop-in",
+                        BlockType.SEMINAR)
+
+    # === SATURDAY (days 6, 13) =========================================
+    timetable += weekly(6, 10, 0, 11, 30, "Gym / Parkrun",
+                        BlockType.SPORT)
+    timetable += weekly(6, 14, 0, 18, 0, "Part-time job (café)",
+                        BlockType.WORK)
+
+    # === SUNDAY (days 0, 7, 14) ========================================
+    # Sundays are mostly free (lie-in + errands)
+    for d in (0, 7, 14):
+        timetable.append(make_block("Lie-in", BlockType.PERSONAL,
+                                    dt(d, 8, 0), dt(d, 10, 0)))
+        timetable.append(make_block("Grocery shopping", BlockType.PERSONAL,
+                                    dt(d, 11, 0), dt(d, 12, 0)))
+
+    # A few one-off events
+    timetable.append(make_block("Doctor's appointment", BlockType.PERSONAL,
+                                dt(3, 8, 0), dt(3, 9, 0),
+                                notes="GP check-up"))
+    timetable.append(make_block("Career Fair", BlockType.OTHER,
+                                dt(11, 13, 0), dt(11, 16, 0),
+                                notes="Imperial spring careers fair"))
+    timetable.append(make_block("Birthday dinner", BlockType.PERSONAL,
+                                dt(12, 19, 0), dt(12, 22, 0)))
+
+    print(f"Total fixed blocks: {len(timetable)}")
+
+    # ------------------------------------------------------------------
+    # Assignments
+    # ------------------------------------------------------------------
+    assignments: list[Assignment] = [
+        make_assignment(
+            title="Algorithms Coursework 2",
+            module_code="CS201",
+            deadline=dt(10, 23, 59),        # Wed 4 Mar
+            base_estimated_minutes=300,
+            strength_score=0.70,
+            priority=Priority.HIGH,
+            description="Implement and benchmark a graph algorithm.",
+        ),
+        make_assignment(
+            title="Linear Algebra Problem Sheet 5",
+            module_code="MATH202",
+            deadline=dt(8, 17, 0),           # Mon 2 Mar
+            base_estimated_minutes=120,
+            strength_score=0.45,
+            priority=Priority.MEDIUM,
+        ),
+        make_assignment(
+            title="Quantum Mechanics Lab Report",
+            module_code="PHYS301",
+            deadline=dt(12, 23, 59),         # Fri 6 Mar
+            base_estimated_minutes=240,
+            strength_score=0.55,
+            priority=Priority.HIGH,
+        ),
+        make_assignment(
+            title="Technical Report Draft",
+            module_code="ENG101",
+            deadline=dt(14, 17, 0),          # Sun 8 Mar
+            base_estimated_minutes=180,
+            strength_score=0.65,
+            priority=Priority.MEDIUM,
+            description="2000-word draft on engineering ethics.",
+        ),
+        make_assignment(
+            title="CS201 Programming Challenge",
+            module_code="CS201",
+            deadline=dt(7, 23, 59),          # Sun 1 Mar
+            base_estimated_minutes=150,
+            strength_score=0.85,
+            priority=Priority.CRITICAL,
+        ),
+    ]
+
+    # ------------------------------------------------------------------
+    # Persist fixed blocks
+    # ------------------------------------------------------------------
+    n = db_add_blocks(DEMO_USER_ID, timetable, source="fixed")
+    print(f"✓ Wrote {n} fixed blocks to MongoDB\n")
+
+    # ------------------------------------------------------------------
+    # Run scheduler
+    # ------------------------------------------------------------------
+    config = SchedulerConfig(
+        slot_minutes=30,
+        min_gap_minutes=10,
+        max_study_hours_by_week=[6.0] * 7,
+        preferred_study_start=time(8, 0),
+        preferred_study_end=time(22, 30),
+        days_before_deadline_buffer=0,
+        strategy=SchedulingStrategy.SPREAD_OUT,
+    )
+    scheduler = Scheduler(config)
+
+    result = scheduler.build(
+        timetable_blocks=timetable,
+        assignments=assignments,
+        scheduling_start=dt(0, 7, 30),
+    )
+    print(result.summary())
+
+    n = db_add_blocks(DEMO_USER_ID, result.new_study_blocks, source="generated")
+    print(f"✓ Wrote {n} study sessions to MongoDB\n")
+
+    # ------------------------------------------------------------------
+    # Print final timetable
+    # ------------------------------------------------------------------
+    all_blocks = get_user_schedule(DEMO_USER_ID)
+    fixed_count = len(get_user_schedule(DEMO_USER_ID, source="fixed"))
+    gen_count = len(get_user_schedule(DEMO_USER_ID, source="generated"))
+    print(f"Total blocks in DB: {len(all_blocks)}  (fixed: {fixed_count}, generated: {gen_count})\n")
+    print(_display_blocks(all_blocks))
+    print("\n✓ demo2 complete — busy two-week timetable persisted.")
+
+
 if __name__ == "__main__":
-    _demo()
+    _demo2()
+    # _populate_assignments(
+    #     "demo-student-001",
+    #     [
+    #         {
+    #             "name": "Algorithms Coursework 2",
+    #             "topic": "CS201",
+    #             "due_date": datetime(2026, 3, 4, 23, 59),
+    #             "date_released": datetime(2026, 2, 22, 9, 0),
+    #             "strength_score": 0.5,
+    #             "duration_minutes": 240,
+    #         },
+    #         {
+    #             "name": "Linear Algebra Problem Sheet 5",
+    #             "topic": "MATH202",
+    #             "due_date": datetime(2026, 3, 2, 17, 0),
+    #             "date_released": datetime(2026, 2, 22, 9, 0),
+    #             "strength_score": 0.5,
+    #             "duration_minutes": 240,
+    #         },
+    #         {
+    #             "name": "Quantum Mechanics Lab Report",
+    #             "topic": "PHYS301",
+    #             "due_date": datetime(2026, 3, 6, 23, 59),
+    #             "date_released": datetime(2026, 2, 23, 10, 0),
+    #             "strength_score": 0.5,
+    #             "duration_minutes": 300,
+    #         },
+    #         {
+    #             "name": "Technical Report Draft",
+    #             "topic": "ENG101",
+    #             "due_date": datetime(2026, 3, 8, 17, 0),
+    #             "date_released": datetime(2026, 2, 24, 11, 0),
+    #             "strength_score": 0.5,
+    #             "duration_minutes": 300,
+    #         },
+    #         {
+    #             "name": "CS201 Programming Challenge",
+    #             "topic": "CS201",
+    #             "due_date": datetime(2026, 3, 1, 23, 59),
+    #             "date_released": datetime(2026, 2, 22, 9, 0),
+    #             "strength_score": 0.5,
+    #             "duration_minutes": 240,
+    #         },
+    #     ]
+    # )

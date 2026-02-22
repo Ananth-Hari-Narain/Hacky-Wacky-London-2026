@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { Calendar } from "@/components/ui/calendar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, X, Clock, Wand2, Loader2 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Plus, X, Clock, Wand2, Loader2, RefreshCw, CheckCircle2, CalendarClock, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,8 @@ interface BackendBlock {
   duration_minutes: number;
   notes: string | null;
   attended: boolean | null;
+  status?: string;   // 'scheduled' | 'completed' | 'missed'
+  source?: string;   // 'fixed' | 'generated'
 }
 
 interface Event {
@@ -28,6 +31,8 @@ interface Event {
   endTime?: string;
   blockType?: string;
   isBackend?: boolean;
+  status?: string;
+  source?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +57,8 @@ function backendBlockToEvent(block: BackendBlock): Event {
     endTime: endDt.toTimeString().slice(0, 5),
     blockType: block.block_type,
     isBackend: true,
+    status: block.status ?? "scheduled",
+    source: block.source ?? "fixed",
   };
 }
 
@@ -75,6 +82,27 @@ function blockTypeBadge(blockType?: string) {
       {entry.label}
     </span>
   );
+}
+
+function statusBadge(status?: string) {
+  const map: Record<string, { label: string; cls: string }> = {
+    scheduled: { label: "Scheduled", cls: "bg-sky-500/20 text-sky-400" },
+    completed: { label: "Completed", cls: "bg-green-500/20 text-green-400" },
+    missed:    { label: "Missed",    cls: "bg-red-500/20 text-red-400" },
+  };
+  if (!status) return null;
+  const entry = map[status] ?? map.scheduled;
+  return (
+    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${entry.cls}`}>
+      {entry.label}
+    </span>
+  );
+}
+
+function statusRowClass(status?: string) {
+  if (status === "completed") return "border-l-2 border-l-green-500/60";
+  if (status === "missed") return "border-l-2 border-l-red-500/60 opacity-60";
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +236,56 @@ const CalendarTab = () => {
     }
   };
 
+  // ---- Update block status (scheduled / completed / missed) ---------
+
+  const updateBlockStatus = async (blockId: string, status: string) => {
+    // Optimistic update
+    setEvents((prev) =>
+      prev.map((e) => (e.id === blockId ? { ...e, status } : e))
+    );
+    try {
+      const res = await fetch(`${API_BASE}/${USER_ID}/blocks/${blockId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast({ title: "Status updated", description: `Session marked as ${status}.` });
+    } catch (err) {
+      console.error("Failed to update status:", err);
+      await fetchSchedule(); // rollback
+      toast({ title: "Update failed", description: "Could not update session status.", variant: "destructive" });
+    }
+  };
+
+  // ---- Regenerate timetable (re-runs scheduler, keeps completed) ----
+
+  const [isRegenerating, setIsRegenerating] = useState(false);
+
+  const regenerateTimetable = async () => {
+    setIsRegenerating(true);
+    try {
+      const res = await fetch(`${API_BASE}/${USER_ID}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assignments: [],
+          config: { strategy: "spread_out" },
+        }),
+      });
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      const data = await res.json();
+      await fetchSchedule();
+
+      const count = data.summary?.new_study_blocks ?? 0;
+      toast({ title: "Timetable regenerated", description: `${count} study sessions regenerated.` });
+    } catch (err: any) {
+      toast({ title: "Regeneration failed", description: err.message || "Could not reach the scheduling API.", variant: "destructive" });
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
   // Build next 7 days from today
   const today = new Date();
   const next7Days = Array.from({ length: 7 }, (_, i) => {
@@ -292,7 +370,16 @@ const CalendarTab = () => {
             {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
             {isGenerating ? "Generating…" : "Auto-Generate Timetable"}
           </Button>
-        </div>
+          {/* Regenerate timetable */}
+          <Button
+            onClick={regenerateTimetable}
+            disabled={isRegenerating}
+            className="w-full gap-2"
+            variant="outline"
+          >
+            {isRegenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            {isRegenerating ? "Regenerating\u2026" : "Regenerate Timetable"}
+          </Button>        </div>
 
         {/* Upcoming week view */}
         <div className="bg-card border border-border rounded-xl p-5 space-y-4">
@@ -309,21 +396,54 @@ const CalendarTab = () => {
                   <div key={day}>
                     <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">{formatDay(day)}</p>
                     <div className="space-y-2">
-                      {dayEvs.map((ev) => (
-                        <div key={ev.id} className="flex items-center gap-3 px-4 py-3 bg-muted/50 rounded-lg group">
-                          {(ev.startTime || ev.endTime) && (
-                            <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-                              <Clock className="w-3 h-3" />
-                              {ev.startTime || "?"}{ev.endTime ? ` – ${ev.endTime}` : ""}
-                            </span>
+                      {dayEvs.map((ev) => {
+                        const isStudy = ev.blockType === "study_session";
+                        return (
+                        <Popover key={ev.id}>
+                          <PopoverTrigger asChild disabled={!isStudy}>
+                            <div className={`flex items-center gap-3 px-4 py-3 bg-muted/50 rounded-lg group ${isStudy ? "cursor-pointer hover:bg-muted/80 transition-colors" : ""} ${statusRowClass(ev.status)}`}>
+                              {(ev.startTime || ev.endTime) && (
+                                <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                                  <Clock className="w-3 h-3" />
+                                  {ev.startTime || "?"}{ev.endTime ? ` \u2013 ${ev.endTime}` : ""}
+                                </span>
+                              )}
+                              {blockTypeBadge(ev.blockType)}
+                              {isStudy && statusBadge(ev.status)}
+                              <span className="text-sm text-foreground flex-1">{ev.title}</span>
+                              <button onClick={(e) => { e.stopPropagation(); removeEvent(ev.id); }} className="opacity-0 group-hover:opacity-100 transition-opacity">
+                                <X className="w-4 h-4 text-destructive" />
+                              </button>
+                            </div>
+                          </PopoverTrigger>
+                          {isStudy && (
+                            <PopoverContent className="w-48 p-2" side="right" align="start">
+                              <p className="text-xs font-semibold text-muted-foreground mb-2 px-1">Mark session as:</p>
+                              <div className="flex flex-col gap-1">
+                                <button
+                                  onClick={() => updateBlockStatus(ev.id, "completed")}
+                                  className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-green-500/10 transition-colors ${ev.status === "completed" ? "bg-green-500/15 text-green-400 font-medium" : "text-foreground"}`}
+                                >
+                                  <CheckCircle2 className="w-4 h-4 text-green-500" /> Completed
+                                </button>
+                                <button
+                                  onClick={() => updateBlockStatus(ev.id, "scheduled")}
+                                  className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-sky-500/10 transition-colors ${ev.status === "scheduled" ? "bg-sky-500/15 text-sky-400 font-medium" : "text-foreground"}`}
+                                >
+                                  <CalendarClock className="w-4 h-4 text-sky-500" /> Scheduled
+                                </button>
+                                <button
+                                  onClick={() => updateBlockStatus(ev.id, "missed")}
+                                  className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-red-500/10 transition-colors ${ev.status === "missed" ? "bg-red-500/15 text-red-400 font-medium" : "text-foreground"}`}
+                                >
+                                  <XCircle className="w-4 h-4 text-red-500" /> Missed
+                                </button>
+                              </div>
+                            </PopoverContent>
                           )}
-                          {blockTypeBadge(ev.blockType)}
-                          <span className="text-sm text-foreground flex-1">{ev.title}</span>
-                          <button onClick={() => removeEvent(ev.id)} className="opacity-0 group-hover:opacity-100 transition-opacity">
-                            <X className="w-4 h-4 text-destructive" />
-                          </button>
-                        </div>
-                      ))}
+                        </Popover>
+                        );
+                      })}
                     </div>
                   </div>
                 );

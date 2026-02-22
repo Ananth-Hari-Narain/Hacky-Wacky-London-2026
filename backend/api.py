@@ -36,7 +36,10 @@ from database.timetable_db import (
     add_blocks as db_add_blocks,
     clear_generated_blocks,
     ensure_indexes,
+    get_user_assignments,
     get_user_schedule,
+    get_user_schedule_raw,
+    update_block_status,
 )
 
 app = FastAPI(title="Scheduling API")
@@ -106,6 +109,10 @@ class GenerateRequest(BaseModel):
     scheduling_start: Optional[str] = None
 
 
+class UpdateStatusRequest(BaseModel):
+    status: str   # 'scheduled' | 'completed' | 'missed'
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -146,23 +153,20 @@ def _parse_time(s: str) -> time:
 
 @app.get("/api/schedule/{user_id}")
 def get_schedule(user_id: str):
-    """Return all blocks (fixed + generated) for a user."""
-    blocks = get_user_schedule(user_id)
-    return [_timeblock_to_dict(b) for b in blocks]
+    """Return all blocks (fixed + generated) for a user, including status."""
+    return get_user_schedule_raw(user_id)
 
 
 @app.get("/api/schedule/{user_id}/fixed")
 def get_fixed_schedule(user_id: str):
     """Return only fixed (user-entered) blocks."""
-    blocks = get_user_schedule(user_id, source="fixed")
-    return [_timeblock_to_dict(b) for b in blocks]
+    return get_user_schedule_raw(user_id, source="fixed")
 
 
 @app.get("/api/schedule/{user_id}/generated")
 def get_generated_schedule(user_id: str):
     """Return only generated (study-session) blocks."""
-    blocks = get_user_schedule(user_id, source="generated")
-    return [_timeblock_to_dict(b) for b in blocks]
+    return get_user_schedule_raw(user_id, source="generated")
 
 
 @app.post("/api/schedule/{user_id}/blocks")
@@ -192,22 +196,43 @@ def delete_generated(user_id: str):
     return {"deleted": deleted}
 
 
+@app.patch("/api/schedule/{user_id}/blocks/{block_id}/status")
+def update_status(user_id: str, block_id: str, body: UpdateStatusRequest):
+    """Update the status of a block (scheduled / completed / missed)."""
+    count = update_block_status(user_id, block_id, body.status)
+    return {"updated": count, "block_id": block_id, "status": body.status}
+
+
 @app.post("/api/schedule/{user_id}/generate")
 def generate_schedule(user_id: str, body: GenerateRequest):
     """Run the scheduler over the user's fixed blocks + provided assignments."""
-    # Build assignments
-    assignments = [
-        make_assignment(
-            title=a.title,
-            module_code=a.module_code,
-            deadline=datetime.fromisoformat(a.deadline),
-            base_estimated_minutes=a.base_estimated_minutes,
-            strength_score=a.strength_score,
-            priority=Priority[a.priority.upper()],
-            description=a.description,
-        )
-        for a in body.assignments
-    ]
+    # Build assignments – if none supplied, pull from DB
+    if body.assignments:
+        assignments = [
+            make_assignment(
+                title=a.title,
+                module_code=a.module_code,
+                deadline=datetime.fromisoformat(a.deadline),
+                base_estimated_minutes=a.base_estimated_minutes,
+                strength_score=a.strength_score,
+                priority=Priority[a.priority.upper()],
+                description=a.description,
+            )
+            for a in body.assignments
+        ]
+    else:
+        db_assignments = get_user_assignments(user_id)
+        assignments = [
+            make_assignment(
+                title=a["name"],
+                module_code=a["topic"],
+                deadline=a["due_date"] if isinstance(a["due_date"], datetime) else datetime.fromisoformat(str(a["due_date"])),
+                base_estimated_minutes=a.get("duration_minutes", 240),
+                strength_score=a.get("strength_score", 0.5),
+                priority=Priority.MEDIUM,
+            )
+            for a in db_assignments
+        ]
 
     # Build config
     rc = body.config or SchedulerConfigIn()

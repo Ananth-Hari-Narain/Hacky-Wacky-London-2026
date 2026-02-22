@@ -60,6 +60,11 @@ def ensure_indexes() -> None:
     col.create_index([("user_id", 1), ("start_time", 1), ("end_time", 1)])
     col.create_index([("block_id", 1)], unique=True)
 
+    # Assignments collection
+    assignments_col = db["assignments"]
+    assignments_col.create_index([("user_id", 1), ("due_date", 1)])
+    assignments_col.create_index([("assignment_id", 1)], unique=True)
+
 
 # ---------------------------------------------------------------------------
 # Core API
@@ -95,6 +100,38 @@ def get_user_schedule(
 
     docs = db["timetable_blocks"].find(query).sort("start_time", 1)
     return [_doc_to_timeblock(doc) for doc in docs]
+
+
+def get_user_schedule_raw(
+    user_id: str,
+    *,
+    source: Optional[str] = None,
+) -> list[dict]:
+    """
+    Like get_user_schedule but returns raw dicts including ``status`` and
+    ``source`` fields.  Used by the API layer for richer serialisation.
+    """
+    db = _get_db()
+    query: dict = {"user_id": user_id}
+    if source is not None:
+        query["source"] = source
+
+    results: list[dict] = []
+    for doc in db["timetable_blocks"].find(query).sort("start_time", 1):
+        tb = _doc_to_timeblock(doc)
+        results.append({
+            "id": tb.id,
+            "title": tb.title,
+            "block_type": tb.block_type.value,
+            "start": tb.start.isoformat(),
+            "end": tb.end.isoformat(),
+            "duration_minutes": tb.duration_minutes,
+            "notes": tb.notes,
+            "attended": tb.attended,
+            "status": doc.get("status", "scheduled"),
+            "source": doc.get("source", "fixed"),
+        })
+    return results
 
 
 def add_blocks(
@@ -155,8 +192,92 @@ def add_blocks(
 
 
 # ---------------------------------------------------------------------------
+# Assignments API
+# ---------------------------------------------------------------------------
+
+def add_assignments(
+    user_id: str,
+    assignments: list[dict],
+) -> int:
+    """
+    Insert or update assignments for a user.
+
+    Each assignment dict must contain:
+        assignment_id, name, topic, due_date, date_released
+
+    Returns the number of documents upserted/modified.
+    """
+    db = _get_db()
+    col = db["assignments"]
+
+    from pymongo import UpdateOne
+
+    ops = [
+        UpdateOne(
+            {"assignment_id": a["assignment_id"]},
+            {"$set": {
+                "assignment_id": a["assignment_id"],
+                "user_id": user_id,
+                "name": a["name"],
+                "topic": a["topic"],
+                "due_date": a["due_date"],
+                "date_released": a["date_released"],
+                "strength_score": a.get("strength_score", 0.5),
+                "duration_minutes": a.get("duration_minutes", 240),
+            }},
+            upsert=True,
+        )
+        for a in assignments
+    ]
+
+    if ops:
+        result = col.bulk_write(ops)
+        return result.upserted_count + result.modified_count
+
+    return 0
+
+
+def get_user_assignments(user_id: str) -> list[dict]:
+    """
+    Retrieve all assignments for a user, sorted by due_date ascending.
+    """
+    db = _get_db()
+    docs = db["assignments"].find({"user_id": user_id}).sort("due_date", 1)
+    return [
+        {
+            "assignment_id": doc["assignment_id"],
+            "name": doc["name"],
+            "topic": doc["topic"],
+            "due_date": doc["due_date"],
+            "date_released": doc["date_released"],
+            "strength_score": doc.get("strength_score", 0.5),
+            "duration_minutes": doc.get("duration_minutes", 240),
+        }
+        for doc in docs
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Helpers for regeneration
 # ---------------------------------------------------------------------------
+
+def update_block_status(user_id: str, block_id: str, status: str) -> int:
+    """
+    Update the status of a timetable block.
+
+    status should be one of: 'scheduled', 'completed', 'missed'.
+    Returns the number of documents modified.
+    """
+    if status not in ("scheduled", "completed", "missed"):
+        raise ValueError(f"status must be 'scheduled', 'completed', or 'missed', got {status!r}")
+
+    db = _get_db()
+    result = db["timetable_blocks"].update_one(
+        {"user_id": user_id, "block_id": block_id},
+        {"$set": {"status": status}},
+    )
+    return result.modified_count
+
 
 def clear_generated_blocks(user_id: str) -> int:
     """

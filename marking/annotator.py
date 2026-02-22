@@ -67,13 +67,14 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
     img_w, img_h = img.size
 
     # ── Layout constants ──────────────────────────────────────────────────────
-    margin_w   = 260          # right annotation margin width
-    badge_d    = 26           # badge diameter
-    badge_x    = img_w + 14   # left edge of badge in the margin
+    margin_w   = 420          # right annotation margin width (wider for detailed text)
+    badge_d    = 30           # badge diameter
+    badge_x    = img_w + 16   # left edge of badge in the margin
     legend_pad = 18
     legend_line_h = 20
     legend_title_h = 28
-    wrap_width = 38           # chars per line in legend
+    wrap_width = 55           # chars per line in legend
+    margin_text_wrap = 48     # chars per line in margin annotations
 
     # Pre-calculate legend height
     legend_entries: List[tuple] = []   # (colour, label_str, wrapped_lines)
@@ -118,9 +119,9 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
         colour  = _COLOURS.get(ann.get("type", ""), _DEFAULT_COLOUR)
 
         # Dot on the image edge
-        dot_r = 5
+        dot_r = 7
         draw.ellipse(
-            [(img_w - dot_r * 2, y_px - dot_r), (img_w - 2, y_px + dot_r)],
+            [(img_w - dot_r * 2, y_px - dot_r), (img_w, y_px + dot_r)],
             fill=colour,
         )
 
@@ -128,7 +129,7 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
         draw.line(
             [(img_w - dot_r * 2, y_px), (badge_x, y_px)],
             fill=colour,
-            width=2,
+            width=3,
         )
 
         # Filled circle badge
@@ -148,16 +149,18 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
             font=font_badge,
         )
 
-        # Short snippet text beside badge (first 35 chars)
-        snippet = ann.get("feedback", "")[:35]
-        if len(ann.get("feedback", "")) > 35:
-            snippet += "…"
-        draw.text(
-            (badge_x + badge_d + 6, y_px - 7),
-            snippet,
-            fill=(50, 50, 50),
-            font=font_snippet,
-        )
+        # Wrapped feedback text beside badge
+        feedback = ann.get("feedback", "")
+        wrapped = textwrap.wrap(feedback, width=margin_text_wrap) or [""]
+        text_y = y_px - 7
+        for line_text in wrapped[:4]:  # max 4 lines in margin
+            draw.text(
+                (badge_x + badge_d + 8, text_y),
+                line_text,
+                fill=(50, 50, 50),
+                font=font_snippet,
+            )
+            text_y += 14
 
     # ── Legend panel ──────────────────────────────────────────────────────────
     leg_y = img_h

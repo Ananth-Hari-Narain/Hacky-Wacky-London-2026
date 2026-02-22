@@ -71,8 +71,9 @@
   .well-list li { color: #4ade80; margin-bottom: 4px; }
   .improve-list li { color: #f87171; margin-bottom: 4px; }
   .images-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
-  .images-row img { width: 100%; border-radius: 8px; background: white; }
-  .images-row .img-label { font-size: 12px; color: #8888a0; margin-bottom: 6px; }
+  .images-row img { width: 100%; border-radius: 8px; background: white; cursor: pointer; transition: transform 0.2s; }
+  .images-row img:hover { transform: scale(1.02); }
+  .images-row .img-label { font-size: 13px; color: #8888a0; margin-bottom: 6px; font-weight: 600; }
   .vector-badge { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-top: 8px; }
   .vector-badge.updated { background: #1a3a2a; color: #4ade80; }
   .vector-badge.not-updated { background: #3a3a1a; color: #facc15; }
@@ -426,10 +427,15 @@ function showResults(data) {
       </div>`;
   });
 
-  // Images
-  document.getElementById('annotatedImg').src = `${API}${data.annotated_image_url}`;
-  document.getElementById('solutionImg').src = `${API}${data.solution_image_url}`;
-  document.getElementById('solutionImg').onerror = function() { this.parentElement.style.display = 'none'; };
+  // Images (click to open full-size in new tab)
+  const annImg = document.getElementById('annotatedImg');
+  annImg.src = `${API}${data.annotated_image_url}`;
+  annImg.onclick = () => window.open(annImg.src, '_blank');
+
+  const solImg = document.getElementById('solutionImg');
+  solImg.src = `${API}${data.solution_image_url}`;
+  solImg.onclick = () => window.open(solImg.src, '_blank');
+  solImg.onerror = function() { this.parentElement.style.display = 'none'; };
 
   // Takeaways
   const tkBox = document.getElementById('takeawaysBox');

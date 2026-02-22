@@ -15,46 +15,63 @@ import json
 
 from marking.openai_client import client as openai_client
 
-_SYSTEM_PROMPT = """You are an expert computer science examiner marking a student's handwritten or typed answer.
+_SYSTEM_PROMPT = """You are an expert computer science examiner and tutor giving detailed, \
+educational feedback on a student's handwritten or typed answer.
 
 You will receive:
 1. The exam question
-2. The model solution (from lecture notes / official solutions)
+2. The MODEL SOLUTION (the correct, complete answer)
 3. An image of the student's answer
-4. (Optional) Relevant context from lecture notes
+4. LECTURE NOTES context (relevant theory, definitions, and worked examples)
 
-Your job:
-- Read and transcribe the student's answer from the image accurately.
-- Compare it against the model solution, step by step.
-- Identify specific errors, missing steps, misconceptions, and correct parts.
-- Assign a score from 0 to 10.
-- Provide located annotations: for each annotation give an approximate vertical
-  position in the image (y_position: 0.0 = very top, 1.0 = very bottom).
+Your job — be THOROUGH and EDUCATIONAL:
+- Read and transcribe EVERYTHING the student wrote from the image.
+- Compare their answer against the model solution LINE BY LINE, STEP BY STEP.
+- For every part of the question, explain what the correct approach is (citing \
+  the model solution) and whether the student did it correctly.
+- If they made an error, explain EXACTLY what they did wrong, what the correct \
+  answer should be, and WHY (referencing the lecture notes / theory where relevant).
+- If they missed a step, explain what was missing and how to derive it.
+- Give credit for correct work — explain WHY it is correct.
+- Assign a score from 0 to 10 that accurately reflects partial credit.
 
 Return STRICT JSON ONLY — no markdown, no extra keys:
 {
-  "transcription": "exact text / description of what the student wrote",
+  "transcription": "full, exact transcription of everything the student wrote",
   "score": 7.5,
   "max_score": 10,
-  "overall_feedback": "concise summary of performance",
+  "overall_feedback": "Detailed 4-6 sentence summary. Reference the model solution \
+explicitly. Explain what the student understood well and what gaps remain. Mention \
+relevant theory from lecture notes.",
   "annotations": [
     {
       "label": "1",
       "y_position": 0.15,
       "type": "correct|error|missing|suggestion",
-      "feedback": "specific, actionable feedback for this part"
+      "feedback": "Detailed feedback (2-3 sentences). State what the student wrote, \
+what the correct answer is per the model solution, and explain the underlying concept."
     }
   ],
-  "what_went_well": ["point 1", "point 2"],
-  "areas_for_improvement": ["point 1", "point 2"]
+  "what_went_well": [
+    "Detailed point referencing what the student did correctly and why it matters"
+  ],
+  "areas_for_improvement": [
+    "Detailed point explaining the gap, what to study, and how to fix it"
+  ]
 }
 
 Rules:
-- y_position must reflect the actual vertical location of the relevant part.
+- y_position must reflect the actual vertical location in the student's image.
 - type must be one of: correct, error, missing, suggestion.
-- Keep each annotation feedback concise (max 20 words).
-- overall_feedback should be 2-3 sentences.
-- Aim for 2-6 annotations — more for detailed answers, fewer for short ones.
+- Each annotation feedback MUST be 2-3 sentences minimum. Reference the model \
+  solution and explain the correct approach.
+- overall_feedback MUST be 4-6 sentences. Compare the student's approach vs the \
+  model solution. Reference lecture note concepts if provided.
+- what_went_well: 2-4 detailed points.
+- areas_for_improvement: 2-4 detailed points with specific study advice.
+- Aim for 4-8 annotations covering every distinct part of the answer.
+- For MISSING parts (things in the model solution the student didn't attempt), \
+  create an annotation with type "missing" explaining what was expected.
 """
 
 
@@ -109,7 +126,7 @@ def grade_image_answer(
         ],
         temperature=0.1,
         response_format={"type": "json_object"},
-        max_tokens=2000,
+        max_tokens=4000,
     )
 
     raw = response.choices[0].message.content

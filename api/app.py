@@ -482,23 +482,24 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
     is_complete = correctness >= 0.7
     vector_updated = False
 
-    if is_complete:
-        problem_vector = doc.get("topic_vector", [])
-        user_vector = user.get("topic_vector", [])
+    # ALWAYS update user vector so the adaptive system learns from every attempt.
+    # High scores boost proficiency; low scores still record the attempt so
+    # /recommend knows which topics the student has engaged with.
+    problem_vector = doc.get("topic_vector", [])
+    user_vector = user.get("topic_vector", [])
 
-        if problem_vector and user_vector and len(problem_vector) == len(user_vector):
-            new_vector = update_user_vector(user_vector, problem_vector, final_score)
-            db["users"].update_one(
-                {"user_id": req.user_id},
-                {
-                    "$set": {
-                        "topic_vector": new_vector,
-                        "updated_at": datetime.now(timezone.utc),
-                    },
-                    "$addToSet": {"completed_problems": doc["_id"]},
-                },
-            )
-            vector_updated = True
+    if problem_vector and user_vector and len(problem_vector) == len(user_vector):
+        new_vector = update_user_vector(user_vector, problem_vector, final_score)
+        update_fields = {
+            "$set": {
+                "topic_vector": new_vector,
+                "updated_at": datetime.now(timezone.utc),
+            },
+        }
+        if is_complete:
+            update_fields["$addToSet"] = {"completed_problems": doc["_id"]}
+        db["users"].update_one({"user_id": req.user_id}, update_fields)
+        vector_updated = True
 
     # ── 7. Convert annotated image to bytes for DB storage ──────────────────
     try:

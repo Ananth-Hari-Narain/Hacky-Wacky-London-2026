@@ -1,12 +1,12 @@
 """
 Image annotator.
 
-Takes a base64 image and a list of annotation dicts from the vision grader,
-draws numbered callout markers at their approximate vertical positions on the
-right edge of the image, and appends a colour-coded feedback legend panel
-below the image.
+Draws large, bold annotation overlays DIRECTLY ON TOP of the student's answer
+image.  Each annotation gets a coloured highlight band spanning the full width
+at its y-position, with a large numbered badge and feedback text.  A detailed
+feedback legend panel is appended below.
 
-Returns the result as a base64-encoded PNG string.
+Returns the result as a base64-encoded JPEG string.
 """
 import base64
 import io
@@ -24,6 +24,9 @@ _COLOURS: Dict[str, tuple] = {
 }
 _DEFAULT_COLOUR = (108, 117, 125)   # grey
 
+# Semi-transparent overlay alpha
+_OVERLAY_ALPHA = 60
+
 # ── Font paths to try (macOS → Linux fallback → PIL default) ─────────────────
 _FONT_PATHS = [
     "/System/Library/Fonts/Helvetica.ttc",
@@ -31,10 +34,17 @@ _FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 ]
+_BOLD_FONT_PATHS = [
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/System/Library/Fonts/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
 
 
-def _load_font(size: int):
-    for path in _FONT_PATHS:
+def _load_font(size: int, bold: bool = False):
+    paths = _BOLD_FONT_PATHS if bold else _FONT_PATHS
+    for path in paths:
         try:
             return ImageFont.truetype(path, size)
         except (IOError, OSError):
@@ -44,8 +54,8 @@ def _load_font(size: int):
 
 def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
     """
-    Annotate the student's answer image with numbered callouts and a
-    feedback legend.
+    Annotate the student's answer image with large, bold overlays directly
+    on the image and a detailed legend panel below.
 
     Args:
         image_base64: base64-encoded PNG / JPEG of the student's answer.
@@ -56,163 +66,216 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
                         feedback   (str)   – short feedback text
 
     Returns:
-        Base64-encoded PNG of the annotated image.
+        Base64-encoded JPEG of the annotated image.
     """
     if not annotations:
         return image_base64
 
     # ── Decode source image ───────────────────────────────────────────────────
     img_data = base64.b64decode(image_base64)
-    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+    img = Image.open(io.BytesIO(img_data)).convert("RGBA")
 
     # Cap image size to avoid huge canvases (and MongoDB 16 MB BSON limit)
-    MAX_DIM = 2000
+    MAX_DIM = 1800
     if max(img.size) > MAX_DIM:
         img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
 
     img_w, img_h = img.size
 
     # ── Layout constants ──────────────────────────────────────────────────────
-    margin_w   = 420          # right annotation margin width (wider for detailed text)
-    badge_d    = 30           # badge diameter
-    badge_x    = img_w + 16   # left edge of badge in the margin
-    legend_pad = 18
-    legend_line_h = 20
-    legend_title_h = 28
-    wrap_width = 55           # chars per line in legend
-    margin_text_wrap = 48     # chars per line in margin annotations
+    band_h       = 52           # height of each highlight band
+    badge_d      = 42           # badge circle diameter
+    badge_margin = 12           # left margin for badge
+    text_left    = badge_margin + badge_d + 12   # where feedback text starts
+    text_wrap    = max(20, (img_w - text_left - 10) // 8)  # chars per line on overlay
 
-    # Pre-calculate legend height
-    legend_entries: List[tuple] = []   # (colour, label_str, wrapped_lines)
+    # Legend panel sizing
+    legend_pad     = 20
+    legend_line_h  = 24
+    legend_title_h = 32
+    legend_wrap    = max(40, (img_w - 60) // 7)
+
+    # ── Fonts ─────────────────────────────────────────────────────────────────
+    font_badge  = _load_font(20, bold=True)
+    font_text   = _load_font(15, bold=True)
+    font_legend_title = _load_font(18, bold=True)
+    font_legend       = _load_font(14)
+    font_legend_bold  = _load_font(14, bold=True)
+
+    # ── Pre-calculate legend height ──────────────────────────────────────────
+    legend_entries: List[tuple] = []   # (colour, label_str, type_str, wrapped_lines)
     for ann in annotations:
         colour  = _COLOURS.get(ann.get("type", ""), _DEFAULT_COLOUR)
         label   = str(ann.get("label", "?"))
-        lines   = textwrap.wrap(ann.get("feedback", ""), width=wrap_width) or [""]
-        legend_entries.append((colour, label, lines))
+        atype   = ann.get("type", "")
+        lines   = textwrap.wrap(ann.get("feedback", ""), width=legend_wrap) or [""]
+        legend_entries.append((colour, label, atype, lines))
 
-    total_legend_lines = sum(len(e[2]) for e in legend_entries)
+    total_legend_lines = sum(len(e[3]) + 1 for e in legend_entries)  # +1 gap per entry
     legend_h = (
         legend_pad
         + legend_title_h
         + total_legend_lines * legend_line_h
-        + legend_pad
+        + legend_pad * 2
     )
 
-    canvas_w = img_w + margin_w
     canvas_h = img_h + legend_h
 
-    # ── Create canvas ─────────────────────────────────────────────────────────
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    # ── Create canvas (RGBA for semi-transparent overlays) ───────────────────
+    canvas = Image.new("RGBA", (img_w, canvas_h), (255, 255, 255, 255))
     canvas.paste(img, (0, 0))
-    draw = ImageDraw.Draw(canvas)
 
-    # Thin separator between image and right margin
-    draw.line([(img_w, 0), (img_w, img_h)], fill=(200, 200, 200), width=1)
+    # ── Draw annotation overlays on top of the image ─────────────────────────
+    # Sort annotations by y_position to avoid overlap issues
+    sorted_anns = sorted(annotations, key=lambda a: float(a.get("y_position", 0.5)))
 
-    # ── Fonts ─────────────────────────────────────────────────────────────────
-    font_badge        = _load_font(13)
-    font_legend_title = _load_font(14)
-    font_legend       = _load_font(12)
-    font_snippet      = _load_font(11)
+    # Track used y-ranges to avoid overlapping bands
+    used_ranges: List[tuple] = []
 
-    # ── Draw callouts ─────────────────────────────────────────────────────────
-    for ann in annotations:
+    for ann in sorted_anns:
         y_frac  = float(ann.get("y_position", 0.5))
-        y_px    = int(y_frac * img_h)
-        y_px    = max(badge_d // 2 + 2, min(img_h - badge_d // 2 - 2, y_px))
+        y_center = int(y_frac * img_h)
+
+        # Clamp to image bounds
+        y_top = max(0, y_center - band_h // 2)
+        y_bot = y_top + band_h
+        if y_bot > img_h:
+            y_bot = img_h
+            y_top = max(0, y_bot - band_h)
+
+        # Shift down if overlapping with a previous band
+        for (used_top, used_bot) in used_ranges:
+            if y_top < used_bot and y_bot > used_top:
+                y_top = used_bot + 2
+                y_bot = y_top + band_h
+                if y_bot > img_h:
+                    y_bot = img_h
+                    y_top = max(0, y_bot - band_h)
+
+        used_ranges.append((y_top, y_bot))
 
         label   = str(ann.get("label", "?"))
         colour  = _COLOURS.get(ann.get("type", ""), _DEFAULT_COLOUR)
 
-        # Dot on the image edge
-        dot_r = 7
+        # Draw semi-transparent coloured band across full width
+        overlay = Image.new("RGBA", (img_w, band_h), (*colour, _OVERLAY_ALPHA))
+        canvas.paste(overlay, (0, y_top), overlay)
+
+        # Draw solid coloured left edge strip (accent bar)
+        accent = Image.new("RGBA", (6, band_h), (*colour, 220))
+        canvas.paste(accent, (0, y_top), accent)
+
+        draw = ImageDraw.Draw(canvas)
+
+        # ── Badge circle ─────────────────────────────────────────────────────
+        badge_x = badge_margin
+        badge_y = y_top + (band_h - badge_d) // 2
         draw.ellipse(
-            [(img_w - dot_r * 2, y_px - dot_r), (img_w, y_px + dot_r)],
-            fill=colour,
+            [(badge_x, badge_y), (badge_x + badge_d, badge_y + badge_d)],
+            fill=(*colour, 240),
         )
 
-        # Horizontal connector line
-        draw.line(
-            [(img_w - dot_r * 2, y_px), (badge_x, y_px)],
-            fill=colour,
-            width=3,
-        )
-
-        # Filled circle badge
-        bx1 = badge_x
-        by1 = y_px - badge_d // 2
-        bx2 = badge_x + badge_d
-        by2 = y_px + badge_d // 2
-        draw.ellipse([(bx1, by1), (bx2, by2)], fill=colour)
-
-        # Centred label number inside badge
+        # Centred label number
         bbox = draw.textbbox((0, 0), label, font=font_badge)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         draw.text(
-            (bx1 + (badge_d - tw) // 2, by1 + (badge_d - th) // 2 - 1),
+            (badge_x + (badge_d - tw) // 2, badge_y + (badge_d - th) // 2 - 1),
             label,
-            fill=(255, 255, 255),
+            fill=(255, 255, 255, 255),
             font=font_badge,
         )
 
-        # Wrapped feedback text beside badge
+        # ── Annotation type tag ──────────────────────────────────────────────
+        atype = ann.get("type", "").upper()
+        type_x = text_left
+        type_y = y_top + 5
+        draw.text(
+            (type_x, type_y),
+            atype,
+            fill=(*colour, 255),
+            font=font_text,
+        )
+
+        # ── Feedback text (first 2 lines, on the overlay) ────────────────────
         feedback = ann.get("feedback", "")
-        wrapped = textwrap.wrap(feedback, width=margin_text_wrap) or [""]
-        text_y = y_px - 7
-        for line_text in wrapped[:4]:  # max 4 lines in margin
-            draw.text(
-                (badge_x + badge_d + 8, text_y),
-                line_text,
-                fill=(50, 50, 50),
-                font=font_snippet,
-            )
-            text_y += 14
+        wrapped = textwrap.wrap(feedback, width=text_wrap) or [""]
+        text_y = type_y + 18
+        for line_text in wrapped[:2]:
+            # Draw text with a subtle dark shadow for readability
+            draw.text((type_x + 1, text_y + 1), line_text, fill=(0, 0, 0, 120), font=font_legend)
+            draw.text((type_x, text_y), line_text, fill=(20, 20, 20, 255), font=font_legend)
+            text_y += 16
 
     # ── Legend panel ──────────────────────────────────────────────────────────
     leg_y = img_h
 
-    # Background
-    draw.rectangle([(0, leg_y), (canvas_w, canvas_h)], fill=(248, 249, 250))
-    draw.line([(0, leg_y), (canvas_w, leg_y)], fill=(200, 200, 200), width=1)
+    # Solid background
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle(
+        [(0, leg_y), (img_w, canvas_h)],
+        fill=(30, 30, 40, 255),
+    )
+
+    # Top accent line
+    draw.rectangle([(0, leg_y), (img_w, leg_y + 3)], fill=(100, 100, 255, 255))
 
     # Title
     draw.text(
-        (legend_pad, leg_y + legend_pad // 2),
-        "Feedback",
-        fill=(33, 37, 41),
+        (legend_pad, leg_y + legend_pad // 2 + 6),
+        "DETAILED FEEDBACK",
+        fill=(255, 255, 255, 255),
         font=font_legend_title,
     )
 
     # Entries
-    cur_y = leg_y + legend_pad + legend_title_h
-    dot_size = 9
-    for colour, label, lines in legend_entries:
+    cur_y = leg_y + legend_pad + legend_title_h + 4
+
+    for colour, label, atype, lines in legend_entries:
         # Coloured dot
+        dot_size = 12
         draw.ellipse(
-            [(legend_pad, cur_y + 4), (legend_pad + dot_size, cur_y + 4 + dot_size)],
-            fill=colour,
+            [(legend_pad, cur_y + 5),
+             (legend_pad + dot_size, cur_y + 5 + dot_size)],
+            fill=(*colour, 255),
         )
-        # Label prefix on first line
-        first_line = f"[{label}]  {lines[0]}" if lines else f"[{label}]"
+
+        # Label + type prefix
+        prefix = f"[{label}] {atype.upper()}: "
         draw.text(
-            (legend_pad + dot_size + 6, cur_y),
-            first_line,
-            fill=(33, 37, 41),
-            font=font_legend,
+            (legend_pad + dot_size + 8, cur_y),
+            prefix,
+            fill=(*colour, 255),
+            font=font_legend_bold,
         )
+
+        # First line of feedback next to prefix
+        prefix_w = draw.textbbox((0, 0), prefix, font=font_legend_bold)[2]
+        if lines:
+            draw.text(
+                (legend_pad + dot_size + 8 + prefix_w, cur_y),
+                lines[0],
+                fill=(220, 220, 230, 255),
+                font=font_legend,
+            )
         cur_y += legend_line_h
-        # Continuation lines (wrapped)
+
+        # Continuation lines
         for cont_line in lines[1:]:
             draw.text(
-                (legend_pad + dot_size + 6 + 24, cur_y),
+                (legend_pad + dot_size + 8 + 20, cur_y),
                 cont_line,
-                fill=(80, 80, 80),
+                fill=(180, 180, 195, 255),
                 font=font_legend,
             )
             cur_y += legend_line_h
 
-    # ── Encode to base64 JPEG (much smaller than PNG for photos) ───────────────
+        cur_y += 4  # gap between entries
+
+    # ── Convert RGBA → RGB and encode to JPEG ────────────────────────────────
+    rgb_canvas = Image.new("RGB", canvas.size, (255, 255, 255))
+    rgb_canvas.paste(canvas, mask=canvas.split()[3])
+
     buf = io.BytesIO()
-    canvas.save(buf, format="JPEG", quality=85)
+    rgb_canvas.save(buf, format="JPEG", quality=85)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")

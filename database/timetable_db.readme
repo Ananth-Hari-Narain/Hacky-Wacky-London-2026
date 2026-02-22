@@ -1,0 +1,98 @@
+================================================================================
+  TIMETABLE DATABASE SCHEMA
+  Database: MongoDB (Atlas)  ·  DB name: hacky_wacky
+================================================================================
+
+
+COLLECTION: users
+─────────────────────────────────────────────────────────────────────────────────
+
+Stores the registered user base.
+
+  Field        Type        Description
+  ───────────  ──────────  ──────────────────────────────────────────────────
+  _id          String      Unique user ID (UUID)
+  name         String      User's display name
+  email        String      Email address (unique)
+
+
+COLLECTION: timetable_blocks
+─────────────────────────────────────────────────────────────────────────────────
+
+Stores every block in a user's timetable — both manually entered events and
+scheduler-generated study sessions.
+
+  Field        Type        Description
+  ───────────  ──────────  ──────────────────────────────────────────────────
+  _id          ObjectId    MongoDB auto-generated ID
+  block_id     String      Application-level UUID (unique index)
+  user_id      String      FK → users._id
+  title        String      Human-readable label (e.g. "CS101 Lecture")
+  block_type   String      One of the BlockType enum values:
+                             lecture, seminar, lab, society, sleep,
+                             sport, work, personal, study_session, other
+  start_time   DateTime    Start of the block (UTC)
+  end_time     DateTime    End of the block (UTC)
+  notes        String?     Optional free-text notes
+  attended     Boolean?    null = unknown/future, true/false = recorded
+  source       String      *** KEY FIELD — see below ***
+                             "fixed"     → user manually entered
+                             "generated" → created by the scheduler
+
+
+INDEXES
+─────────────────────────────────────────────────────────────────────────────────
+
+  Index                                         Type      Purpose
+  ────────────────────────────────────────────   ────────  ─────────────────────
+  (block_id)                                    Unique    Upsert by block ID
+  (user_id, source)                             Compound  Filter by source type
+  (user_id, start_time, end_time)               Compound  Time-range queries
+
+
+THE "source" FIELD — FIXED vs GENERATED
+─────────────────────────────────────────────────────────────────────────────────
+
+Every timetable block is tagged with a source:
+
+  "fixed"       Blocks the user created themselves — lectures, sleep,
+                societies, personal events, etc.  These are NEVER touched
+                by the scheduler.
+
+  "generated"   Study sessions produced by the scheduling algorithm.
+                These can be safely deleted and regenerated at any time:
+
+                    db.timetable_blocks.delete_many({
+                        "user_id": "<id>",
+                        "source": "generated"
+                    })
+
+This distinction means:
+  • Editing free time or re-running the scheduler only wipes "generated"
+    blocks — the user's original inputs remain intact.
+  • The scheduler reads back only "fixed" blocks to know what's occupied,
+    then fills gaps with new "generated" study sessions.
+
+
+API FUNCTIONS (database/timetable_db.py)
+─────────────────────────────────────────────────────────────────────────────────
+
+  get_user_schedule(user_id, *, source=None)
+      → list[TimeBlock]
+      Reads all blocks for a user, optionally filtered by source.
+      Sorted by start_time ascending.
+
+  add_blocks(user_id, blocks, source="fixed")
+      → int
+      Upserts blocks for a user. Returns count of documents written.
+      source must be "fixed" or "generated".
+
+  clear_generated_blocks(user_id)
+      → int
+      Deletes all "generated" blocks for a user. Returns deleted count.
+      Call before re-running the scheduler.
+
+  ensure_indexes()
+      Creates the indexes listed above (idempotent).
+
+================================================================================

@@ -29,7 +29,7 @@ from pymongo.server_api import ServerApi
 
 load_dotenv()
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 
 
 def get_client():

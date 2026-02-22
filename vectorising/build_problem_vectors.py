@@ -22,8 +22,9 @@ from pymongo.server_api import ServerApi
 
 load_dotenv()
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
 
 
 def get_db(uri: str, db_name: str):
@@ -35,7 +36,7 @@ def main():
     db = get_db(MONGODB_URI, MONGODB_DB)
 
     # Fetch all questions that have a topic_vector (skip Preamble/Appendix)
-    questions = list(db["questions"].find({
+    questions = list(db[MONGODB_COLLECTION].find({
         "topic_vector": {"$exists": True},
         "question": {"$not": {"$regex": "^(Preamble|Appendix)", "$options": "i"}},
     }))

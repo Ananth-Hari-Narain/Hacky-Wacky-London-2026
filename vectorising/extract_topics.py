@@ -33,7 +33,7 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 MODEL = "gpt-4o-mini"

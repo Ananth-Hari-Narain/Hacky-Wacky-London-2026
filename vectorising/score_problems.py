@@ -30,8 +30,9 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 MODEL = "gpt-4o-mini"
 
@@ -129,7 +130,7 @@ def main():
 
     # 2. Fetch all problems (skip Preamble / Appendix)
     questions = list(
-        db["questions"].find({
+        db[MONGODB_COLLECTION].find({
             "question": {"$not": {"$regex": "^(Preamble|Appendix)", "$options": "i"}}
         })
     )
@@ -156,7 +157,7 @@ def main():
             print("(no topics matched)")
 
         # 4. Update the document
-        db["questions"].update_one(
+        db[MONGODB_COLLECTION].update_one(
             {"_id": q["_id"]},
             {
                 "$set": {

@@ -73,13 +73,15 @@ Option C — Save to file (testing):
 import base64
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import certifi
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
 from pymongo import MongoClient
@@ -88,15 +90,30 @@ from pymongo.server_api import ServerApi
 from api.judging import judge_answer
 from api.scoring import compute_final_score, update_user_vector
 
+# Marking system imports (vision grading, annotation, chat, RAG)
+from marking.db import (
+    init_marking_db, save_image_submission, get_image_submission,
+    create_chat_session,
+)
+from marking.vision_grader import grade_image_answer
+from marking.annotator import annotate_image
+from marking.rag import search_chunks
+from marking.chat import get_ai_reply, get_chat_history
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+if not MONGODB_URI:
+    raise RuntimeError("MONGODB_URI (or MONGO_URI) not found in .env")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not found in .env")
 
 # ---------------------------------------------------------------------------
 # Globals
@@ -115,6 +132,17 @@ _mongo = MongoClient(MONGODB_URI, server_api=ServerApi("1"), tlsCAFile=certifi.w
 db = _mongo[MONGODB_DB]
 oai = OpenAI(api_key=OPENAI_API_KEY)
 
+# Serve the frontend
+_static_dir = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return FileResponse(_static_dir / "index.html")
+
+# Share our MongoDB client with the marking package (avoids duplicate connections)
+init_marking_db(_mongo)
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -131,6 +159,17 @@ class JudgeRequest(BaseModel):
     attempt: int  # 1-based
 
 
+class SubmitImageRequest(BaseModel):
+    user_id: str
+    image_base64: str
+    attempt: int = 1  # 1-based
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -143,7 +182,7 @@ def _img_to_b64(data: bytes | None) -> str | None:
 
 def _get_problem(problem_id: str) -> dict:
     try:
-        doc = db["questions"].find_one({"_id": ObjectId(problem_id)})
+        doc = db[MONGODB_COLLECTION].find_one({"_id": ObjectId(problem_id)})
     except Exception:
         doc = None
     if not doc:
@@ -241,6 +280,18 @@ def get_solution_image(problem_id: str):
             img = sol.get("solution_image")
     if not img:
         raise HTTPException(404, "No solution image for this problem")
+    return Response(content=bytes(img), media_type="image/png")
+
+
+@app.get("/submission/{submission_id}/annotated-image")
+def get_annotated_image(submission_id: str):
+    """Serves the annotated answer image as a PNG — viewable directly in a browser."""
+    sub = get_image_submission(submission_id)
+    if not sub:
+        raise HTTPException(404, f"Submission {submission_id} not found")
+    img = sub.get("annotated_image")
+    if not img:
+        raise HTTPException(404, "No annotated image for this submission")
     return Response(content=bytes(img), media_type="image/png")
 
 
@@ -364,3 +415,196 @@ def get_user(user_id: str):
         ]
 
     return profile
+
+
+# ---------------------------------------------------------------------------
+# Image-based grading (vision) + adaptive learning update
+# ---------------------------------------------------------------------------
+
+@app.post("/problem/{problem_id}/submit-image")
+def submit_image(problem_id: str, req: SubmitImageRequest):
+    """
+    Grade a student's handwritten answer image AND update their topic_vector.
+
+    This is the unified endpoint that bridges vision grading with adaptive
+    learning. After grading, the user's proficiency vector is updated so
+    future /recommend calls reflect their progress.
+    """
+    # ── 1. Validate user and problem ─────────────────────────────────────────
+    doc = _get_problem(problem_id)
+    user = _get_user(req.user_id)
+
+    # ── 2. Resolve question text + solution ──────────────────────────────────
+    question_text = doc.get("text", "") or doc.get("question", "")
+    solution_text = doc.get("solution_text", "")
+
+    if not solution_text:
+        sol = _get_solution(problem_id, doc)
+        solution_text = sol.get("solution_text", "") if sol else ""
+
+    if not question_text:
+        raise HTTPException(400, "No question text available for this problem.")
+
+    # ── 3. RAG context from ingested PDFs ────────────────────────────────────
+    rag_context = search_chunks(
+        query=question_text,
+        collections=["solution_chunks", "notes_chunks"],
+        top_k=3,
+    )
+
+    # ── 4. Vision grading ────────────────────────────────────────────────────
+    grade_result = grade_image_answer(
+        image_base64=req.image_base64,
+        question_text=question_text,
+        solution_text=solution_text,
+        rag_context=rag_context,
+    )
+
+    # ── 5. Annotate image ────────────────────────────────────────────────────
+    try:
+        annotated_b64 = annotate_image(
+            req.image_base64,
+            grade_result.get("annotations", []),
+        )
+    except Exception:
+        annotated_b64 = req.image_base64  # fallback to original
+
+    # ── 6. Score normalisation + user vector update ──────────────────────────
+    raw_score = float(grade_result.get("score", 0))
+    max_score = float(grade_result.get("max_score", 10))
+    correctness = raw_score / max_score if max_score > 0 else 0.0
+    correctness = max(0.0, min(1.0, correctness))
+
+    hint_usage = user.get("hint_usage", {})
+    hints_used = len(hint_usage.get(problem_id, []))
+
+    final_score = compute_final_score(correctness, hints_used, req.attempt)
+    is_complete = correctness >= 0.7
+    vector_updated = False
+
+    if is_complete:
+        problem_vector = doc.get("topic_vector", [])
+        user_vector = user.get("topic_vector", [])
+
+        if problem_vector and user_vector and len(problem_vector) == len(user_vector):
+            new_vector = update_user_vector(user_vector, problem_vector, final_score)
+            db["users"].update_one(
+                {"user_id": req.user_id},
+                {
+                    "$set": {
+                        "topic_vector": new_vector,
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                    "$addToSet": {"completed_problems": doc["_id"]},
+                },
+            )
+            vector_updated = True
+
+    # ── 7. Convert annotated image to bytes for DB storage ──────────────────
+    try:
+        annotated_bytes = base64.b64decode(annotated_b64)
+    except Exception:
+        annotated_bytes = None
+
+    # ── 8. Persist submission + create chat session ──────────────────────────
+    submission_id = save_image_submission({
+        "user_id":          req.user_id,
+        "question_id":      problem_id,
+        "question_text":    question_text,
+        "solution_text":    solution_text,
+        "grade_result":     grade_result,
+        "correctness":      correctness,
+        "final_score":      final_score,
+        "hints_used":       hints_used,
+        "attempt":          req.attempt,
+        "vector_updated":   vector_updated,
+        "annotated_image":  annotated_bytes,
+        "created_at":       datetime.now(timezone.utc),
+    })
+
+    session_id = create_chat_session({
+        "user_id":       req.user_id,
+        "submission_id": submission_id,
+        "context": {
+            "question_text":         question_text,
+            "solution_text":         solution_text,
+            "student_transcription": grade_result.get("transcription", ""),
+            "score":                 grade_result.get("score", 0),
+            "overall_feedback":      grade_result.get("overall_feedback", ""),
+            "annotations":           grade_result.get("annotations", []),
+            "what_went_well":        grade_result.get("what_went_well", []),
+            "areas_for_improvement": grade_result.get("areas_for_improvement", []),
+        },
+        "messages":   [],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    })
+
+    # ── 9. Return response ───────────────────────────────────────────────────
+    return {
+        # Adaptive learning fields
+        "correctness":       round(correctness, 2),
+        "final_score":       round(final_score, 2),
+        "is_complete":       is_complete,
+        "hints_used":        hints_used,
+        "attempt":           req.attempt,
+        "vector_updated":    vector_updated,
+        "key_takeaways":     doc.get("key_takeaways", []) if is_complete else [],
+        # Vision grading fields
+        "session_id":            session_id,
+        "submission_id":         submission_id,
+        "score":                 grade_result.get("score", 0),
+        "max_score":             grade_result.get("max_score", 10),
+        "overall_feedback":      grade_result.get("overall_feedback", ""),
+        "what_went_well":        grade_result.get("what_went_well", []),
+        "areas_for_improvement": grade_result.get("areas_for_improvement", []),
+        "annotations":           grade_result.get("annotations", []),
+        "transcription":         grade_result.get("transcription", ""),
+        # Image URLs (open in browser to view)
+        "annotated_image_url":   f"/submission/{submission_id}/annotated-image",
+        "solution_image_url":    f"/problem/{problem_id}/solution-image",
+        "solution_text":         solution_text,
+    }
+
+
+@app.post("/problem/{problem_id}/submit-image-upload")
+async def submit_image_upload(
+    problem_id: str,
+    file: UploadFile = File(..., description="Student answer image (PNG/JPEG)"),
+    user_id: str = Form(..., description="Student user ID"),
+    attempt: int = Form(1, description="Attempt number (1-based)"),
+):
+    """Same as /submit-image but accepts a file upload (easier for Swagger testing)."""
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "No image file provided.")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return submit_image(
+        problem_id,
+        SubmitImageRequest(user_id=user_id, image_base64=image_b64, attempt=attempt),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tutor chat
+# ---------------------------------------------------------------------------
+
+@app.post("/chat")
+def chat(payload: ChatRequest):
+    """Send a message to the AI tutor about a graded submission."""
+    try:
+        reply = get_ai_reply(payload.session_id, payload.message)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Chat error: {exc}")
+    return {"session_id": payload.session_id, "reply": reply}
+
+
+@app.get("/chat/{session_id}/history")
+def chat_history(session_id: str):
+    """Return the full message history for a chat session."""
+    history = get_chat_history(session_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"session_id": session_id, "messages": history}

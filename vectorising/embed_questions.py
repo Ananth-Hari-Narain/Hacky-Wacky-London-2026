@@ -36,7 +36,7 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
 MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]

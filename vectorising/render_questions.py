@@ -39,8 +39,9 @@ from pymongo.server_api import ServerApi
 
 load_dotenv()
 
-MONGODB_URI = os.environ["MONGODB_URI"]
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "question_bank")
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "questions")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 CHUNKING_MODEL = "gpt-4o-mini"
 HINTS_MODEL = "gpt-4o-mini"
@@ -462,7 +463,7 @@ def _match_question_doc(questions_coll, source: str, label: str):
 def process(pdf_dir: Path, solutions_dir: Path):
     oai = OpenAI(api_key=OPENAI_API_KEY)
     db = get_db(MONGODB_URI, MONGODB_DB)
-    questions_coll = db["questions"]
+    questions_coll = db[MONGODB_COLLECTION]
 
     pdf_files = sorted(pdf_dir.glob("*.pdf"))
     if not pdf_files:

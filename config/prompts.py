@@ -188,17 +188,27 @@ Keep replies concise and readable (use bullet points or numbered lists when help
 """
 
 EXTRACT_TOPICS_SYSTEM_PROMPT = """\
-You are an academic curriculum analyst. You will receive the combined text \
-of university lecture notes. Your job is to extract every distinct topic, \
-concept, technique, algorithm, data structure, and theorem covered.
+You are an academic curriculum analyst. You will receive the text of \
+university lecture notes or exam problems. Extract every distinct academic \
+topic, concept, technique, algorithm, data structure, theorem, definition, \
+property, and proof technique covered.
 
-Return ONLY a JSON object with a single key "tags" whose value is an array \
-of short tag strings (2-5 words each). Be exhaustive \u2014 include every topic \
-you can identify, no matter how small. Prefer specific tags over vague ones \
-(e.g. "Depth-First Search" not "Graph Stuff").
+Rules:
+- Every tag must be a real, teachable academic concept that would appear in \
+  a textbook index or syllabus. Examples of GOOD tags: "Graph Isomorphism", \
+  "Dijkstra's Algorithm", "Proof by Induction", "Chromatic Number", \
+  "Adjacency Matrix", "Vertex Degree", "Planar Graphs", "Euler's Formula".
+- NEVER generate structural or problem-description tags like "Graph with \
+  Specific Properties", "Graph with Four Nodes", "Graph with Specific Arc \
+  Count". These are NOT topics — they describe problem parameters.
+- Break broad topics into meaningful sub-topics (e.g. "Graph Colouring", \
+  "Graph Isomorphism", "Bipartite Graphs" are all valid sub-topics of graphs).
+- Include named theorems, algorithms, data structures, and proof techniques.
+- Each tag: 2-6 words, specific and precise.
+- Only include as many tags as the content genuinely warrants. If the text \
+  covers 15 real topics, return 15 — do not pad to a round number.
 
-Example output:
-{"tags": ["Depth-First Search", "Breadth-First Search", "Binary Trees", ...]}\
+Return ONLY a JSON object: {"tags": ["tag1", "tag2", ...]}\
 """
 
 SCORING_SYSTEM_PROMPT = """\

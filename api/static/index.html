@@ -847,6 +847,32 @@
     letter-spacing: 0.5px;
   }
 
+  /* ── Countdown ────────────────────────────────────────────────── */
+  .cd-unit {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 16px;
+    padding: 24px 20px;
+    min-width: 100px;
+    text-align: center;
+  }
+  .cd-unit .cd-num {
+    font-size: 48px;
+    font-weight: 800;
+    background: linear-gradient(135deg, #818cf8, #c084fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1;
+  }
+  .cd-unit .cd-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #6b6b80;
+    margin-top: 8px;
+  }
+
   /* ── Calendar ──────────────────────────────────────────────────── */
   .cal-layout { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
   .cal-sidebar { display: flex; flex-direction: column; gap: 16px; }
@@ -1023,6 +1049,10 @@
         <span class="nav-icon">&#x1F4C5;</span>
         <span>Calendar</span>
       </button>
+      <button class="nav-tab" onclick="switchTab('countdown')">
+        <span class="nav-icon">&#x23F3;</span>
+        <span>Exams</span>
+      </button>
       <button class="nav-tab" onclick="switchTab('upload')">
         <span class="nav-icon">&#x1F4C1;</span>
         <span>Upload</span>
@@ -1085,6 +1115,16 @@
           <span class="empty-icon">&#x1F4DD;</span>
           No practice questions yet. Click Generate to create some!
         </div>
+      </div>
+    </div>
+
+    <!-- ─── Tab: Exam Countdown ──────────────────────────────── -->
+    <div class="tab-content" id="tab-countdown">
+      <div class="card" style="text-align:center; padding:60px 24px;">
+        <h2 style="font-size:28px; margin-bottom:8px;">&#x1F393; Exam Countdown</h2>
+        <p style="color:#6b6b80; margin-bottom:40px;">1st May 2026</p>
+        <div id="countdownDisplay" style="display:flex; justify-content:center; gap:24px; flex-wrap:wrap;"></div>
+        <p id="countdownMotivation" style="margin-top:32px; font-size:15px; color:#a5b4fc;"></p>
       </div>
     </div>
 
@@ -1536,12 +1576,22 @@ function showResults(data) {
   attempt++;
 
   const score = data.score;
+  const maxScore = data.max_score || 10;
+  const pct = Math.round((score / maxScore) * 100);
   const circle = document.getElementById('scoreCircle');
-  circle.textContent = `${score}/10`;
-  circle.className = 'score-circle ' + (score >= 7 ? 'high' : score >= 4 ? 'mid' : 'low');
+  circle.textContent = `${score}/${maxScore}`;
+  circle.className = 'score-circle ' + (pct >= 70 ? 'high' : pct >= 40 ? 'mid' : 'low');
 
-  document.getElementById('scoreText').textContent =
-    `Final score: ${(data.final_score * 100).toFixed(0)}% | ${data.is_complete ? 'Complete' : 'Try again for higher score'}`;
+  // Show raw percentage, plus penalty breakdown if any
+  const hintsUsed = data.hints_used || 0;
+  const attemptNum = data.attempt || 1;
+  const hasPenalty = hintsUsed > 0 || attemptNum > 1;
+  let scoreLine = `Score: ${pct}%`;
+  if (hasPenalty) {
+    scoreLine += ` (adjusted to ${(data.final_score * 100).toFixed(0)}% after ${hintsUsed} hint${hintsUsed !== 1 ? 's' : ''}, ${attemptNum} attempt${attemptNum !== 1 ? 's' : ''})`;
+  }
+  scoreLine += ` | ${data.is_complete ? 'Complete' : 'Try again for higher score'}`;
+  document.getElementById('scoreText').textContent = scoreLine;
 
   const badge = document.getElementById('vectorBadge');
   if (data.vector_updated) {
@@ -1670,6 +1720,42 @@ function switchTab(tabName) {
   if (tabName === 'calendar') {
     loadSchedule();
   }
+  if (tabName === 'countdown') {
+    startCountdown();
+  }
+}
+
+// ── Exam Countdown ──────────────────────────────────────────────────────
+let countdownInterval = null;
+function startCountdown() {
+  if (countdownInterval) clearInterval(countdownInterval);
+  updateCountdown();
+  countdownInterval = setInterval(updateCountdown, 1000);
+}
+function updateCountdown() {
+  const exam = new Date('2026-05-01T09:00:00');
+  const now = new Date();
+  const diff = exam - now;
+  const el = document.getElementById('countdownDisplay');
+  const mot = document.getElementById('countdownMotivation');
+  if (diff <= 0) {
+    el.innerHTML = '<div class="cd-unit"><div class="cd-num">0</div><div class="cd-label">Days</div></div>';
+    mot.textContent = 'Exams are here. You got this!';
+    clearInterval(countdownInterval);
+    return;
+  }
+  const days = Math.floor(diff / 86400000);
+  const hrs = Math.floor((diff % 86400000) / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  const secs = Math.floor((diff % 60000) / 1000);
+  el.innerHTML = [
+    ['Days', days], ['Hours', hrs], ['Minutes', mins], ['Seconds', secs]
+  ].map(([l, v]) => `<div class="cd-unit"><div class="cd-num">${v}</div><div class="cd-label">${l}</div></div>`).join('');
+  if (days > 30) mot.textContent = "Plenty of time — build good habits now.";
+  else if (days > 14) mot.textContent = "Two weeks out. Time to lock in.";
+  else if (days > 7) mot.textContent = "One week to go. You've prepared for this.";
+  else if (days > 1) mot.textContent = "Final stretch. Stay focused.";
+  else mot.textContent = "Tomorrow. Trust your preparation.";
 }
 
 // ── Load generated questions ──────────────────────────────────────────

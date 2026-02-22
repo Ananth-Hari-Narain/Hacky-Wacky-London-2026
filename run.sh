@@ -10,5 +10,9 @@ if [ -n "$PID" ]; then
   sleep 1
 fi
 
+echo "Reprocessing all data from scratch..."
+python -m scripts.reprocess_all
+echo ""
+
 echo "Starting server on http://localhost:$PORT"
 uvicorn api.main:app --reload --port $PORT

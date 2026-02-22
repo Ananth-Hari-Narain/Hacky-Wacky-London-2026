@@ -2,6 +2,7 @@
 Upload endpoints for processing problem PDFs, solution PDFs, and lecture notes.
 Processing happens synchronously.
 """
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +12,14 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from config.settings import SOLUTIONS_DIR
 from services.pipeline import process_problem_pdf
 from services.ingest_notes import ingest_pdf
+from services.recommendations import (
+    append_new_tags,
+    score_and_vectorise_problems,
+    extract_full_text,
+)
+from models.db import questions_coll
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["Upload"])
 
@@ -37,9 +46,33 @@ async def upload_problems(
     finally:
         tmp_path.unlink(missing_ok=True)
 
+    # --- Auto-update topics and vectors for the new problems ---
+    new_tags_count = 0
+    if docs:
+        # 1. Extract topics from the new problem texts, append to master
+        combined = "\n\n".join(d["text"] for d in docs if d.get("text"))
+        if combined.strip():
+            _, new_tags_count = append_new_tags(combined)
+
+        # 2. Retrieve the IDs of the just-upserted questions
+        coll = questions_coll()
+        problem_ids = []
+        for d in docs:
+            found = coll.find_one(
+                {"source": d["source"], "chunk_index": d["chunk_index"]},
+                {"_id": 1},
+            )
+            if found:
+                problem_ids.append(found["_id"])
+
+        # 3. Score and vectorise only the new problems
+        if problem_ids:
+            score_and_vectorise_problems(problem_ids)
+
     return {
         "filename": file.filename,
         "questions_created": len(docs),
+        "new_topics_added": new_tags_count,
         "questions": [
             {
                 "label": d["question"],
@@ -102,8 +135,16 @@ async def upload_notes(
     finally:
         tmp_path.unlink(missing_ok=True)
 
+    # Extract topics from the saved lecture notes and append to master
+    note_text = extract_full_text(dest)
+    if note_text.strip():
+        _, new_tags_count = append_new_tags(note_text)
+    else:
+        new_tags_count = 0
+
     return {
         "filename": file.filename,
         "chunks_created": chunk_count,
+        "new_topics_added": new_tags_count,
         "collection": "notes_chunks",
     }

@@ -64,6 +64,12 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
     # ── Decode source image ───────────────────────────────────────────────────
     img_data = base64.b64decode(image_base64)
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
+
+    # Cap image size to avoid huge canvases (and MongoDB 16 MB BSON limit)
+    MAX_DIM = 2000
+    if max(img.size) > MAX_DIM:
+        img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+
     img_w, img_h = img.size
 
     # ── Layout constants ──────────────────────────────────────────────────────
@@ -205,8 +211,8 @@ def annotate_image(image_base64: str, annotations: List[Dict]) -> str:
             )
             cur_y += legend_line_h
 
-    # ── Encode to base64 PNG ──────────────────────────────────────────────────
+    # ── Encode to base64 JPEG (much smaller than PNG for photos) ───────────────
     buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
+    canvas.save(buf, format="JPEG", quality=85)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")

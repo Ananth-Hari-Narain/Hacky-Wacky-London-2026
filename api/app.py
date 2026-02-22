@@ -292,7 +292,7 @@ def get_annotated_image(submission_id: str):
     img = sub.get("annotated_image")
     if not img:
         raise HTTPException(404, "No annotated image for this submission")
-    return Response(content=bytes(img), media_type="image/png")
+    return Response(content=bytes(img), media_type="image/jpeg")
 
 
 @app.post("/problem/{problem_id}/hint")
@@ -507,7 +507,7 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         annotated_bytes = None
 
     # ── 8. Persist submission + create chat session ──────────────────────────
-    submission_id = save_image_submission({
+    sub_doc = {
         "user_id":          req.user_id,
         "question_id":      problem_id,
         "question_text":    question_text,
@@ -520,7 +520,13 @@ def submit_image(problem_id: str, req: SubmitImageRequest):
         "vector_updated":   vector_updated,
         "annotated_image":  annotated_bytes,
         "created_at":       datetime.now(timezone.utc),
-    })
+    }
+    try:
+        submission_id = save_image_submission(sub_doc)
+    except Exception:
+        # Image too large for BSON — retry without the image bytes
+        sub_doc.pop("annotated_image", None)
+        submission_id = save_image_submission(sub_doc)
 
     session_id = create_chat_session({
         "user_id":       req.user_id,

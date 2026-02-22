@@ -51,8 +51,9 @@ each distinct question, problem, or exercise begins.
 
 Return ONLY a JSON array of objects, each with:
 - "line": the line number where this section starts
-- "label": a short label for the section (e.g. "Preamble", "Question 1", \
-"Question 2a", "Problem 3", etc.)
+- "label": use the format "Question N" where N is the ACTUAL number used in \
+  the document (e.g. if the text says "5. A graph is simple..." the label must \
+  be "Question 5", NOT a sequential counter).
 
 Rules:
 - The first entry should cover any preamble/header text (use label "Preamble"). \
@@ -61,6 +62,8 @@ If there is no preamble, start with the first question.
 to the next.
 - Keep sub-parts of the same question together (e.g. parts a, b, c of Q1 \
 should be one chunk) UNLESS they are clearly separate problems.
+- IMPORTANT: The label number MUST match the question number in the document text. \
+  Do not renumber sequentially.
 - If the document ends with non-question content (e.g. acknowledgements, \
 comparisons, notes, appendices), create a final entry with label "Appendix" \
 so it is separated from the last real question.

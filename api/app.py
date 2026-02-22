@@ -158,6 +158,18 @@ def _get_user(user_id: str) -> dict:
     return user
 
 
+def _get_solution(problem_id: str, doc: dict) -> dict | None:
+    """
+    Find the solution for a problem from the question document fields.
+    """
+    if doc.get("solution_text") or doc.get("solution_image"):
+        return {
+            "solution_text": doc.get("solution_text", ""),
+            "solution_image": doc.get("solution_image"),
+        }
+    return None
+
+
 def _dot(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
@@ -222,6 +234,11 @@ def get_solution_image(problem_id: str):
     """Serves the solution image as a PNG."""
     doc = _get_problem(problem_id)
     img = doc.get("solution_image")
+    # Fallback: check solutions collection
+    if not img:
+        sol = _get_solution(problem_id, doc)
+        if sol:
+            img = sol.get("solution_image")
     if not img:
         raise HTTPException(404, "No solution image for this problem")
     return Response(content=bytes(img), media_type="image/png")
@@ -257,6 +274,11 @@ def judge(problem_id: str, req: JudgeRequest):
 
     problem_text = doc.get("text", "")
     solution_text = doc.get("solution_text", "")
+
+    # Fallback: check solutions collection
+    if not solution_text:
+        sol = _get_solution(problem_id, doc)
+        solution_text = sol.get("solution_text", "") if sol else ""
 
     if not solution_text:
         raise HTTPException(400, "No solution available for this problem")

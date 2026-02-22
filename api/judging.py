@@ -40,21 +40,37 @@ def judge_answer(
 
     Returns {"correctness": float, "feedback": str, "is_complete": bool}
     """
-    response = client.chat.completions.create(
-        model=JUDGE_MODEL,
-        temperature=0.1,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Problem:\n{problem_text}\n\n"
-                    f"Exemplar solution:\n{solution_text}\n\n"
-                    f"Student's answer:\n{student_answer}"
-                ),
-            },
-        ],
-    )
+    try:
+        response = client.chat.completions.create(
+            model=JUDGE_MODEL,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Problem:\n{problem_text}\n\n"
+                        f"Exemplar solution:\n{solution_text}\n\n"
+                        f"Student's answer:\n{student_answer}"
+                    ),
+                },
+            ],
+        )
+        result = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        return {
+            "correctness": 0.0,
+            "feedback": "Unable to parse grading response. Please try again.",
+            "is_complete": False,
+        }
+    except Exception as e:
+        return {
+            "correctness": 0.0,
+            "feedback": f"Grading error: {e}. Please try again.",
+            "is_complete": False,
+        }
 
-    return json.loads(response.choices[0].message.content)
+    # Clamp correctness to valid range
+    result["correctness"] = max(0.0, min(1.0, float(result.get("correctness", 0.0))))
+    return result

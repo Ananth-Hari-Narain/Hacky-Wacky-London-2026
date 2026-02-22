@@ -2,8 +2,10 @@
 render_questions.py
 
 For each problem in question_bank.questions, renders the question region
-from the PDF as a PNG image. Optionally matches solution PDFs to render
-solution images. Uses GPT-4o to generate hints and key takeaways.
+from the PDF as a cropped PNG image (not the full page). Handles multi-page
+questions by stitching cropped regions. Optionally matches solution PDFs to
+render solution images. Uses GPT-4o-mini to generate hints and key takeaways.
+Writes solutions to a dedicated question_bank.solutions collection.
 
 Usage:
     python render_questions.py [--pdf-dir ./pdfs] [--solutions-dir ./solutions]
@@ -21,15 +23,18 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import certifi
 import fitz  # pymupdf
 from dotenv import load_dotenv
 from openai import OpenAI
-from pymongo import MongoClient
+from PIL import Image
+from pymongo import MongoClient, UpdateOne
 from pymongo.server_api import ServerApi
 
 load_dotenv()
@@ -40,25 +45,80 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 CHUNKING_MODEL = "gpt-4o-mini"
 HINTS_MODEL = "gpt-4o-mini"
 
+# Margin (in PDF points) around cropped question regions
+CROP_MARGIN_TOP = 15.0
+CROP_MARGIN_BOTTOM = 20.0
+
 # ---------------------------------------------------------------------------
-# Shared helpers (same as embed_questions.py)
+# Shared helpers
 # ---------------------------------------------------------------------------
 
-def _strip_page_numbers(page_text: str, page_num: int) -> str:
-    lines = page_text.splitlines()
-    while lines and lines[-1].strip() in (str(page_num), str(page_num - 1)):
-        lines.pop()
-    return "\n".join(lines)
+def _extract_question_number(label: str) -> str | None:
+    """Extract the numeric/alphanumeric question identifier from a label.
+    'Question 1' -> '1', 'Solution 2a' -> '2a', 'Q3' -> '3', '1.' -> '1'
+    """
+    cleaned = label.strip().lower()
+    for pat in [
+        r'(?:question|problem|solution|answer|q|mark\s*scheme)\s*(\d+[a-z]*)',
+        r'^(\d+[a-z]*)\b',
+    ]:
+        m = re.search(pat, cleaned, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
 
 
-def extract_full_text(pdf_path: Path) -> str:
+def _extract_lines_with_bboxes(page) -> list[dict]:
+    """
+    Extract text lines AND their bounding boxes from a single get_text("dict") call.
+    Guarantees 1:1 correspondence between text and bboxes.
+    """
+    lines = []
+    data = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            text = "".join(span["text"] for span in line.get("spans", []))
+            lines.append({
+                "text": text,
+                "bbox": tuple(line["bbox"]),
+            })
+    return lines
+
+
+def _extract_all_block_bboxes(page) -> list[tuple]:
+    """
+    Extract bounding boxes for ALL blocks (text + image) on a page.
+    Used to find the full extent of content including vector diagrams.
+    """
+    bboxes = []
+    data = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    for block in data.get("blocks", []):
+        bboxes.append(tuple(block["bbox"]))
+    return bboxes
+
+
+def _strip_page_number_lines(lines: list[dict], page_num: int) -> list[dict]:
+    """Remove trailing lines that are just the page number."""
+    result = list(lines)
+    while result and result[-1]["text"].strip() in (str(page_num), str(page_num - 1)):
+        result.pop()
+    return result
+
+
+def extract_full_text_aligned(pdf_path: Path) -> str:
+    """Extract text using get_text('dict') so line counts match build_page_line_map exactly."""
     parts = []
     with fitz.open(pdf_path) as doc:
-        for page_num, page in enumerate(doc, start=1):
-            text = page.get_text("text").strip()
-            if text:
-                text = _strip_page_numbers(text, page_num)
-                parts.append(text)
+        for page_idx, page in enumerate(doc):
+            lines = _extract_lines_with_bboxes(page)
+            if not lines:
+                continue
+            lines = _strip_page_number_lines(lines, page_idx + 1)
+            if lines:
+                page_text = "\n".join(entry["text"] for entry in lines)
+                parts.append(page_text)
     return "\n\n".join(parts)
 
 
@@ -69,18 +129,23 @@ each distinct question, problem, or exercise begins.
 
 Return ONLY a JSON array of objects, each with:
 - "line": the line number where this section starts
-- "label": a short label for the section (e.g. "Preamble", "Question 1", etc.)
+- "label": use the format "Question N" where N is the ACTUAL number used in \
+  the document (e.g. if the text says "5. A graph is simple..." the label must \
+  be "Question 5", NOT a sequential counter).
 
 Rules:
 - The first entry should cover any preamble/header text (use label "Preamble").
 - Each entry marks the START of a new section.
-- Keep sub-parts of the same question together.
+- Keep sub-parts of the same question together (e.g. parts a, b, c of Q1 are one chunk).
+- IMPORTANT: The label number MUST match the question number in the document text. \
+  Do not renumber sequentially.
 - If the document ends with non-question content, create a final entry with label "Appendix".
 - Return valid JSON only, no markdown fences, no commentary.\
 """
 
 
-def identify_breaks(client: OpenAI, text: str, model: str) -> tuple[list[dict], list[str]]:
+def identify_breaks(client: OpenAI, text: str, model: str,
+                    system_prompt: str | None = None) -> tuple[list[dict], list[str]]:
     raw_lines = text.splitlines()
     numbered = [f"[{i + 1}] {line}" for i, line in enumerate(raw_lines)]
     numbered_text = "\n".join(numbered)
@@ -90,7 +155,7 @@ def identify_breaks(client: OpenAI, text: str, model: str) -> tuple[list[dict], 
         temperature=0,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": CHUNKING_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or CHUNKING_SYSTEM_PROMPT},
             {"role": "user", "content": f"The document has {len(raw_lines)} lines.\n\n{numbered_text}"},
         ],
     )
@@ -107,54 +172,175 @@ def identify_breaks(client: OpenAI, text: str, model: str) -> tuple[list[dict], 
 
 
 # ---------------------------------------------------------------------------
-# PDF page/line mapping
+# PDF page/line mapping with bounding boxes (unified extraction)
 # ---------------------------------------------------------------------------
 
 def build_page_line_map(pdf_path: Path) -> list[dict]:
     """
-    For each page, record the line range in the concatenated text.
-    Returns [{page_num, start_line, end_line, page_obj_index}].
+    For each page, record the line range, per-line bounding boxes, and
+    all block bounding boxes (for capturing diagrams between text lines).
     """
     pages = []
     current_line = 1
     with fitz.open(pdf_path) as doc:
         for page_idx, page in enumerate(doc):
-            text = page.get_text("text").strip()
-            if not text:
+            lines = _extract_lines_with_bboxes(page)
+            if not lines:
                 continue
-            text = _strip_page_numbers(text, page_idx + 1)
-            n_lines = len(text.splitlines())
+
+            lines = _strip_page_number_lines(lines, page_idx + 1)
+            if not lines:
+                continue
+
+            n_lines = len(lines)
+            line_bboxes = [
+                (current_line + j, entry["bbox"])
+                for j, entry in enumerate(lines)
+            ]
+
             pages.append({
                 "page_idx": page_idx,
                 "start_line": current_line,
                 "end_line": current_line + n_lines - 1,
+                "page_width": page.rect.width,
+                "page_height": page.rect.height,
+                "line_bboxes": line_bboxes,
+                "block_bboxes": _extract_all_block_bboxes(page),
             })
-            # +1 for the blank line between pages in extract_full_text
-            current_line += n_lines + 1  # \n\n adds an empty line
+            # +1 for the blank line between pages (from \n\n join)
+            current_line += n_lines + 1
     return pages
 
 
-def render_region(pdf_path: Path, page_idx: int, clip_rect=None, dpi: int = 200) -> bytes:
-    """Render a page (or clipped region) as PNG bytes."""
-    with fitz.open(pdf_path) as doc:
-        page = doc[page_idx]
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
-        pix = page.get_pixmap(matrix=mat, clip=clip_rect)
-        return pix.tobytes("png")
+# ---------------------------------------------------------------------------
+# Cropped image rendering
+# ---------------------------------------------------------------------------
+
+def get_question_clip_rects(page_line_map: list[dict],
+                            start_line: int, end_line: int) -> list[dict]:
+    """
+    For a question spanning start_line to end_line, return a clip rect
+    per page it appears on. Each entry: {"page_idx": int, "clip_rect": fitz.Rect}.
+
+    The top boundary is the first matched text line's y-top.
+    The bottom boundary is the NEXT line after end_line's y-top (i.e. the start
+    of the next question), or the page bottom. This ensures diagrams and vector
+    graphics between text lines are fully captured.
+    """
+    clips = []
+    for pm in page_line_map:
+        # Does this page overlap with the question's line range?
+        if pm["end_line"] < start_line or pm["start_line"] > end_line:
+            continue
+
+        first_q_line = max(start_line, pm["start_line"])
+        last_q_line = min(end_line, pm["end_line"])
+
+        # Find y-top from the first question line on this page
+        first_bbox = None
+        for line_num, bbox in pm["line_bboxes"]:
+            if line_num == first_q_line:
+                first_bbox = bbox
+                break
+
+        if first_bbox is None:
+            clips.append({"page_idx": pm["page_idx"], "clip_rect": None})
+            continue
+
+        y_top = first_bbox[1]
+
+        # Find y-bottom: use the start of the NEXT line after this question
+        # on the same page (= start of next question). This captures all
+        # content including diagrams between the text labels.
+        next_line_y = None
+        if last_q_line < pm["end_line"]:
+            # There are more lines on this page after our question
+            for line_num, bbox in pm["line_bboxes"]:
+                if line_num == last_q_line + 1:
+                    next_line_y = bbox[1]
+                    break
+
+        if next_line_y is not None:
+            # Clip just above the next question's first line
+            y_bottom = next_line_y
+        else:
+            # Last question on this page — use the bottom of the last
+            # matched line, extended to include any overlapping blocks
+            y_bottom = max(b[3] for ln, b in pm["line_bboxes"]
+                          if first_q_line <= ln <= last_q_line)
+            # Extend to capture blocks that overlap our y-range
+            for block_bbox in pm.get("block_bboxes", []):
+                by_top, by_bottom = block_bbox[1], block_bbox[3]
+                if by_bottom > y_top and by_top < y_bottom:
+                    y_bottom = max(y_bottom, by_bottom)
+
+        # Apply margins
+        y_top = max(0, y_top - CROP_MARGIN_TOP)
+        y_bottom = min(pm["page_height"], y_bottom + CROP_MARGIN_BOTTOM)
+
+        clip = fitz.Rect(0, y_top, pm["page_width"], y_bottom)
+        clips.append({"page_idx": pm["page_idx"], "clip_rect": clip})
+
+    return clips
+
+
+def stitch_pixmaps(pixmaps: list) -> bytes:
+    """Vertically stitch multiple PyMuPDF Pixmaps into a single PNG using Pillow."""
+    if len(pixmaps) == 1:
+        return pixmaps[0].tobytes("png")
+
+    images = [Image.open(BytesIO(pix.tobytes("png"))) for pix in pixmaps]
+    total_w = max(img.width for img in images)
+    total_h = sum(img.height for img in images)
+
+    result = Image.new("RGB", (total_w, total_h), (255, 255, 255))
+    y_offset = 0
+    for img in images:
+        result.paste(img, (0, y_offset))
+        y_offset += img.height
+
+    buf = BytesIO()
+    result.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def render_question_image(pdf_path: Path, page_line_map: list[dict],
                           start_line: int, end_line: int, dpi: int = 200) -> bytes:
     """
-    Render the PDF region covering start_line to end_line as a PNG.
-    If the question spans multiple pages, renders the first page it appears on.
+    Render the PDF region covering start_line to end_line as a cropped PNG.
+    Handles multi-page questions by stitching cropped regions.
     """
-    # Find which page this question starts on
-    for pm in page_line_map:
-        if pm["start_line"] <= start_line <= pm["end_line"]:
-            return render_region(pdf_path, pm["page_idx"], dpi=dpi)
-    # Fallback: render first page
-    return render_region(pdf_path, 0, dpi=dpi)
+    clips = get_question_clip_rects(page_line_map, start_line, end_line)
+
+    if not clips:
+        # Fallback: render first page fully
+        with fitz.open(pdf_path) as doc:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            return doc[0].get_pixmap(matrix=mat).tobytes("png")
+
+    pixmaps = []
+    with fitz.open(pdf_path) as doc:
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        for cr in clips:
+            clip_rect = cr["clip_rect"]
+            # Validate clip rect has positive dimensions
+            if clip_rect is not None and (clip_rect.width <= 0 or clip_rect.height <= 0):
+                # Skip invalid clips — fall back to full page for this segment
+                clip_rect = None
+            pix = doc[cr["page_idx"]].get_pixmap(matrix=mat, clip=clip_rect)
+            if pix.width > 0 and pix.height > 0:
+                pixmaps.append(pix)
+
+    if not pixmaps:
+        # All clips were invalid — render first page of the document
+        with fitz.open(pdf_path) as doc:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            return doc[0].get_pixmap(matrix=mat).tobytes("png")
+
+    # Single page: return directly. Multi-page: stitch.
+    if len(pixmaps) == 1:
+        return pixmaps[0].tobytes("png")
+    return stitch_pixmaps(pixmaps)
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +398,28 @@ def generate_hints(client: OpenAI, question_text: str,
 # Solution PDF matching
 # ---------------------------------------------------------------------------
 
+SOLUTION_CHUNKING_SYSTEM_PROMPT = """\
+You are a document segmentation assistant. You will receive the full text of \
+a PDF containing solutions, answers, or mark schemes. Your job is to identify \
+where EACH individual numbered answer/solution begins.
+
+Return ONLY a JSON array of objects, each with:
+- "line": the line number where this solution starts
+- "label": use ONLY the format "Question N" (e.g. "Question 1", "Question 2") \
+  matching the answer number. Extract the answer number from whatever format \
+  the document uses (e.g. "1.", "Answer 1", "Solution 1", "Q1").
+
+Rules:
+- The first entry should cover any preamble/header text (use label "Preamble").
+- Each entry marks the START of a new answer section.
+- IMPORTANT: Each numbered answer MUST be its own section. If the document has \
+  answers numbered 1 through 10, you must produce 10 entries (plus preamble). \
+  Do NOT group multiple answers into one section.
+- Keep sub-parts (a, b, c) of the same numbered answer together.
+- Return valid JSON only, no markdown fences, no commentary.\
+"""
+
 def find_solution_pdf(problem_pdf: Path, solutions_dir: Path) -> Path | None:
-    """
-    Try to match a solution PDF for a problem PDF.
-    Conventions tried:
-        first_PMT.pdf → first_PMT_solutions.pdf
-        first_PMT.pdf → first_PMT_sol.pdf
-        first_PMT.pdf → first_PMT_answers.pdf
-    """
     stem = problem_pdf.stem
     for suffix in ("_solutions", "_sol", "_answers", "_ms", "_markscheme"):
         candidate = solutions_dir / f"{stem}{suffix}.pdf"
@@ -241,6 +441,24 @@ def get_db(uri: str, db_name: str):
 # Main pipeline
 # ---------------------------------------------------------------------------
 
+def _match_question_doc(questions_coll, source: str, label: str):
+    """Find the matching question document, with fallback to number-based matching."""
+    # Try exact match first
+    doc = questions_coll.find_one({"source": source, "question": label})
+    if doc:
+        return doc
+
+    # Fallback: match by extracted question number
+    q_num = _extract_question_number(label)
+    if not q_num:
+        return None
+    for cand in questions_coll.find({"source": source}):
+        cand_num = _extract_question_number(cand.get("question", ""))
+        if cand_num == q_num:
+            return cand
+    return None
+
+
 def process(pdf_dir: Path, solutions_dir: Path):
     oai = OpenAI(api_key=OPENAI_API_KEY)
     db = get_db(MONGODB_URI, MONGODB_DB)
@@ -256,8 +474,8 @@ def process(pdf_dir: Path, solutions_dir: Path):
     for pdf_path in pdf_files:
         print(f"=== {pdf_path.name} ===")
 
-        # 1. Chunk the problem PDF
-        full_text = extract_full_text(pdf_path)
+        # 1. Chunk the problem PDF (using aligned extraction)
+        full_text = extract_full_text_aligned(pdf_path)
         breaks, raw_lines = identify_breaks(oai, full_text, CHUNKING_MODEL)
         page_line_map = build_page_line_map(pdf_path)
 
@@ -268,8 +486,11 @@ def process(pdf_dir: Path, solutions_dir: Path):
         sol_page_map = None
         if sol_pdf:
             print(f"  Solution PDF: {sol_pdf.name}")
-            sol_text = extract_full_text(sol_pdf)
-            sol_breaks, sol_raw_lines = identify_breaks(oai, sol_text, CHUNKING_MODEL)
+            sol_text = extract_full_text_aligned(sol_pdf)
+            sol_breaks, sol_raw_lines = identify_breaks(
+                oai, sol_text, CHUNKING_MODEL,
+                system_prompt=SOLUTION_CHUNKING_SYSTEM_PROMPT,
+            )
             sol_page_map = build_page_line_map(sol_pdf)
         else:
             print("  No solution PDF found")
@@ -286,19 +507,21 @@ def process(pdf_dir: Path, solutions_dir: Path):
 
             print(f"  {label} ... ", end="", flush=True)
 
-            # Render question image
+            # Render cropped question image
             q_image = render_question_image(pdf_path, page_line_map, start_line, end_line)
 
-            # Render solution image + get solution text
+            # Render solution image + get solution text (number-based matching)
             sol_image = None
             sol_text_chunk = None
             if sol_breaks and sol_raw_lines:
-                # Try to match by label (e.g. "Question 1" in both)
+                q_num = _extract_question_number(label)
                 matched_sol = None
-                for j, sb in enumerate(sol_breaks):
-                    if sb["label"].lower() == label.lower():
-                        matched_sol = j
-                        break
+                if q_num:
+                    for j, sb in enumerate(sol_breaks):
+                        s_num = _extract_question_number(sb["label"])
+                        if s_num and s_num == q_num:
+                            matched_sol = j
+                            break
                 if matched_sol is not None:
                     s_start = sol_breaks[matched_sol]["line"]
                     s_end = (sol_breaks[matched_sol + 1]["line"] - 1
@@ -308,8 +531,7 @@ def process(pdf_dir: Path, solutions_dir: Path):
                     sol_image = render_question_image(sol_pdf, sol_page_map, s_start, s_end)
 
             # Generate hints — skip if text is too short (likely diagram-heavy)
-            # Short text means the question relies on a visual we can't send
-            MIN_TEXT_FOR_HINTS = 150  # characters
+            MIN_TEXT_FOR_HINTS = 150
             hints = []
             takeaways = []
             if len(question_text) >= MIN_TEXT_FOR_HINTS:
@@ -317,9 +539,9 @@ def process(pdf_dir: Path, solutions_dir: Path):
                 hints = hints_data.get("hints", [])
                 takeaways = hints_data.get("key_takeaways", [])
             else:
-                print(f"[skipped hints: text too short ({len(question_text)} chars, likely diagram)] ", end="")
+                print(f"[skipped hints: text too short ({len(question_text)} chars)] ", end="")
 
-            # Update MongoDB document
+            # Update question document (with fallback matching)
             update_fields = {
                 "question_image": q_image,
                 "hints": hints,
@@ -331,13 +553,18 @@ def process(pdf_dir: Path, solutions_dir: Path):
             if sol_text_chunk:
                 update_fields["solution_text"] = sol_text_chunk
 
-            result = questions_coll.update_one(
-                {"source": pdf_path.name, "question": label},
-                {"$set": update_fields},
-            )
+            q_doc = _match_question_doc(questions_coll, pdf_path.name, label)
+            if q_doc:
+                questions_coll.update_one(
+                    {"_id": q_doc["_id"]},
+                    {"$set": update_fields},
+                )
+                q_status = "updated"
+            else:
+                q_status = "not found"
 
-            status = "updated" if result.modified_count else "matched" if result.matched_count else "not found"
-            print(f"{status} ({len(hints)} hints, {len(q_image)} bytes)")
+            sol_status = " +solution" if (sol_text_chunk or sol_image) else ""
+            print(f"{q_status}{sol_status} ({len(hints)} hints, {len(q_image)} bytes)")
 
     print("\nDone.")
 

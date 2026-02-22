@@ -39,6 +39,11 @@ class Priority(Enum):
     CRITICAL = 4
 
 
+class SchedulingStrategy(Enum):
+    ASAP = "asap"
+    SPREAD_OUT = "spread_out"
+
+
 # ---------------------------------------------------------------------------
 # Core Data Models
 # ---------------------------------------------------------------------------
@@ -136,12 +141,12 @@ class SchedulerConfig:
     """Tuning parameters for the scheduler."""
     slot_minutes: int = 30                  # granularity of work slots
     min_gap_minutes: int = 5               # buffer between a block and a study session
-    max_daily_study_hours: float = 7.0      # cap per day to avoid burnout
+    max_study_hours_by_week: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0])   # max study hours per day of week
     preferred_study_start: time = time(9, 0)
     preferred_study_end: time = time(22, 0)
     days_before_deadline_buffer: int = 1    # stop scheduling within N days of deadline
-    n_weeks: Optional[int] = 2
-
+    max_consecutive_slots: int = 4          # max number of back-to-back study slots for the same assignment (so 2 hours by default)
+    strategy: SchedulingStrategy = SchedulingStrategy.ASAP
 
 # ---------------------------------------------------------------------------
 # Scheduler
@@ -217,19 +222,37 @@ class Scheduler:
             )
 
             free_slots = self._find_free_slots(blocked, now, latest_dt)
+            if self.config.strategy == SchedulingStrategy.SPREAD_OUT:
+                free_slots = self._spread_slots(free_slots, now, latest_dt)
 
             slots_placed = 0
+            consecutive_slots = 0
+            prev_slot_end: Optional[datetime] = None
             for slot_start, slot_end in free_slots:
                 if assignment.remaining_slots == 0:
                     break
+
+                if prev_slot_end == slot_start:
+                    consecutive_slots += 1
+                else:
+                    consecutive_slots = 1
+                prev_slot_end = slot_end
+
+                ## If been going for more than max_consecutive_slots, take a break
+                if consecutive_slots > self.config.max_consecutive_slots:
+                    consecutive_slots = 0
+                    prev_slot_end = None
+                    continue
 
                 # Check daily cap
                 day = slot_start.date()
                 day_minutes = self._scheduled_minutes_on_day(
                     new_study_blocks, day
                 )
-                max_day_minutes = int(self.config.max_daily_study_hours * 60)
+                max_day_minutes = int(self.config.max_study_hours_by_week[day.weekday()] * 60)
                 if day_minutes >= max_day_minutes:
+                    consecutive_slots = 0
+                    prev_slot_end = None
                     continue
 
                 # Clamp slot to daily cap
@@ -238,6 +261,8 @@ class Scheduler:
                     max_day_minutes - day_minutes,
                 )
                 if available < self.config.slot_minutes:
+                    consecutive_slots = 0
+                    prev_slot_end = None
                     continue   # not enough room for a full slot on this day
 
                 study_block = TimeBlock(
@@ -320,7 +345,8 @@ class Scheduler:
         """
         Re-order slots so they are distributed across the available date range
         rather than front-loaded, to encourage a healthy spread of study.
-        Implements a simple interleaving: pick one slot per day in round-robin.
+        Uses day-by-day round-robin in small contiguous chunks to avoid
+        over-fragmenting sessions.
         """
         if not slots:
             return slots
@@ -330,14 +356,24 @@ class Scheduler:
         for s, e in slots:
             day_buckets[s.date()].append((s, e))
 
-        # Interleave day by day
+        # Interleave day by day with small per-day batches to keep flow.
         sorted_days = sorted(day_buckets.keys())
+        chunk_size = max(1, min(2, self.config.max_consecutive_slots))
+        day_offsets: dict[date, int] = {d: 0 for d in sorted_days}
         result: list[tuple[datetime, datetime]] = []
-        max_per_day = max(len(v) for v in day_buckets.values())
-        for i in range(max_per_day):
+        while True:
+            added_any = False
             for d in sorted_days:
-                if i < len(day_buckets[d]):
-                    result.append(day_buckets[d][i])
+                bucket = day_buckets[d]
+                offset = day_offsets[d]
+                if offset >= len(bucket):
+                    continue
+                end_offset = min(offset + chunk_size, len(bucket))
+                result.extend(bucket[offset:end_offset])
+                day_offsets[d] = end_offset
+                added_any = True
+            if not added_any:
+                break
         return result
 
     def _align_to_slot(self, dt: datetime) -> datetime:
@@ -778,10 +814,11 @@ def _demo() -> None:
     config = SchedulerConfig(
         slot_minutes=30,
         min_gap_minutes=10,
-        max_daily_study_hours=5.0,
+        max_study_hours_by_week=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], # 5 hours per day
         preferred_study_start=time(8, 0),
         preferred_study_end=time(22, 30),
         days_before_deadline_buffer=0,
+        strategy=SchedulingStrategy.SPREAD_OUT,
     )
 
     scheduler = Scheduler(config)

@@ -14,7 +14,6 @@ from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -716,19 +715,116 @@ def make_assignment(
 # Demo / smoke test
 # ---------------------------------------------------------------------------
 
+def _display_blocks(blocks: list[TimeBlock], start_date: Optional[date] = None, end_date: Optional[date] = None) -> str:
+    """
+    Standalone timetable printer that works on any list of TimeBlocks
+    (without needing a ScheduleResult).
+    """
+    if not blocks:
+        return "No blocks to display."
+
+    if start_date is None:
+        start_date = min(b.start.date() for b in blocks)
+    if end_date is None:
+        end_date = max(b.end.date() for b in blocks)
+
+    ICONS = {
+        BlockType.LECTURE:       "📚",
+        BlockType.SEMINAR:       "🗣 ",
+        BlockType.LAB:           "🔬",
+        BlockType.SOCIETY:       "🎭",
+        BlockType.SLEEP:         "😴",
+        BlockType.SPORT:         "🏃",
+        BlockType.WORK:          "💼",
+        BlockType.PERSONAL:      "🧍",
+        BlockType.STUDY_SESSION: "✏️ ",
+        BlockType.OTHER:         "📌",
+    }
+    W = 60
+
+    def sep(c: str = "─") -> str:
+        return c * W
+
+    def centre(t: str) -> str:
+        return t.center(W)
+
+    lines: list[str] = [sep("═"), centre("  STUDENT TIMETABLE"), sep("═")]
+    cur = start_date
+    while cur <= end_date:
+        day_blocks = sorted(
+            [b for b in blocks if b.start.date() == cur],
+            key=lambda b: b.start,
+        )
+        lines.append("")
+        lines.append(centre(f"┌── {cur.strftime('%A  %d %B %Y')} ──┐"))
+        lines.append(sep())
+        if not day_blocks:
+            lines.append(centre("(no blocks)"))
+        else:
+            prev_end: Optional[datetime] = None
+            for block in day_blocks:
+                if prev_end and block.start > prev_end:
+                    gap = int((block.start - prev_end).total_seconds() / 60)
+                    if gap >= 30:
+                        lines.append(
+                            f"  · · · free  {prev_end.strftime('%H:%M')} – "
+                            f"{block.start.strftime('%H:%M')} ({gap}min)"
+                        )
+                icon = ICONS.get(block.block_type, "📌")
+                lines.append(f"  {icon} {block.title}")
+                lines.append(
+                    f"     {block.start.strftime('%H:%M')} – "
+                    f"{block.end.strftime('%H:%M')}  ({block.duration_minutes}min)"
+                )
+                lines.append(sep("·"))
+                prev_end = block.end
+        cur += timedelta(days=1)
+
+    lines += ["", sep("═")]
+    return "\n".join(lines)
+
+
 def _demo() -> None:
     """
-    Quick demonstration of the scheduler with realistic sample data.
-    Monday 2025-06-09  →  Friday 2025-06-13
+    End-to-end demonstration with MongoDB persistence.
+
+    1. Load sample timetable into DB as 'fixed' blocks (clearing old data).
+    2. Run the scheduler and store generated blocks.
+    3. Re-read everything from DB and print.
+    4. User adds a new fixed break → regenerate → store → re-read → print.
     """
+    from database.timetable_db import (
+        add_blocks as db_add_blocks,
+        clear_generated_blocks,
+        get_user_schedule,
+        ensure_indexes,
+        _get_db,
+    )
+
+    # ------------------------------------------------------------------
+    # Setup: fixed demo user
+    # ------------------------------------------------------------------
+    DEMO_USER_ID = "demo-student-001"
+    ensure_indexes()
+
+    # Wipe this user's previous data entirely
+    db = _get_db()
+    db["timetable_blocks"].delete_many({"user_id": DEMO_USER_ID})
+    db["users"].update_one(
+        {"_id": DEMO_USER_ID},
+        {"$set": {"name": "Demo Student", "email": "demo@example.com"}},
+        upsert=True,
+    )
+    print("✓ Cleared previous demo data from MongoDB\n")
+
+    # ------------------------------------------------------------------
+    # Sample timetable (Mon 2025-06-09 → Fri 2025-06-13)
+    # ------------------------------------------------------------------
     monday = datetime(2025, 6, 9)
 
     def dt(day_offset: int, hour: int, minute: int = 0) -> datetime:
         return monday + timedelta(days=day_offset, hours=hour, minutes=minute)
 
-    # ------------------------------------------------------------------
-    # Student timetable
-    # ------------------------------------------------------------------
     timetable: list[TimeBlock] = [
         # --- Monday ---
         make_block("Sleep",              BlockType.SLEEP,    dt(0, 0),   dt(0, 7, 30)),
@@ -740,14 +836,12 @@ def _demo() -> None:
         make_block("CS101 Lab",          BlockType.LAB,      dt(0, 14),  dt(0, 16)),
         make_block("Football Society",   BlockType.SOCIETY,  dt(0, 18),  dt(0, 20)),
         make_block("Sleep",              BlockType.SLEEP,    dt(0, 23),  dt(1, 7, 30)),
-
         # --- Tuesday ---
         make_block("PHYS301 Lecture",    BlockType.LECTURE,  dt(1, 10),  dt(1, 11),
                    notes="Quantum mechanics intro.", attended=True),
         make_block("MATH201 Seminar",    BlockType.SEMINAR,  dt(1, 13),  dt(1, 14)),
         make_block("Part-time job",      BlockType.WORK,     dt(1, 16),  dt(1, 20)),
         make_block("Sleep",              BlockType.SLEEP,    dt(1, 23),  dt(2, 7, 30)),
-
         # --- Wednesday ---
         make_block("CS101 Lecture",      BlockType.LECTURE,  dt(2, 9),   dt(2, 10),
                    notes="Graphs and BFS/DFS."),
@@ -755,13 +849,11 @@ def _demo() -> None:
         make_block("PHYS301 Lab",        BlockType.LAB,      dt(2, 14),  dt(2, 17)),
         make_block("Chess Society",      BlockType.SOCIETY,  dt(2, 18),  dt(2, 19, 30)),
         make_block("Sleep",              BlockType.SLEEP,    dt(2, 23),  dt(3, 7, 30)),
-
         # --- Thursday ---
         make_block("MATH201 Lecture",    BlockType.LECTURE,  dt(3, 10),  dt(3, 11)),
         make_block("Lunch",              BlockType.PERSONAL, dt(3, 12),  dt(3, 13)),
         make_block("Part-time job",      BlockType.WORK,     dt(3, 15),  dt(3, 19)),
         make_block("Sleep",              BlockType.SLEEP,    dt(3, 23),  dt(4, 7, 30)),
-
         # --- Friday ---
         make_block("CS101 Seminar",      BlockType.SEMINAR,  dt(4, 9),   dt(4, 10)),
         make_block("PHYS301 Lecture",    BlockType.LECTURE,  dt(4, 11),  dt(4, 12)),
@@ -776,60 +868,138 @@ def _demo() -> None:
         make_assignment(
             title="Binary Trees Essay",
             module_code="CS101",
-            deadline=dt(3, 23, 59),          # Thursday night
+            deadline=dt(3, 23, 59),
             base_estimated_minutes=180,
-            strength_score=0.75,             # fairly strong → ~225 min
+            strength_score=0.75,
             priority=Priority.HIGH,
             description="3000 word essay on binary tree applications.",
         ),
         make_assignment(
             title="Integration Problem Sheet",
             module_code="MATH201",
-            deadline=dt(4, 17, 0),           # Friday 5pm
+            deadline=dt(4, 17, 0),
             base_estimated_minutes=120,
-            strength_score=0.40,             # weak area → ~192 min
+            strength_score=0.40,
             priority=Priority.MEDIUM,
         ),
         make_assignment(
             title="Quantum Mechanics Report",
             module_code="PHYS301",
-            deadline=dt(5, 23, 59),          # Saturday night
+            deadline=dt(5, 23, 59),
             base_estimated_minutes=240,
-            strength_score=0.55,             # average → ~276 min
+            strength_score=0.55,
             priority=Priority.HIGH,
         ),
         make_assignment(
             title="Programming Assignment",
             module_code="CS101",
-            deadline=dt(6, 17, 0),           # Sunday 5pm
+            deadline=dt(6, 17, 0),
             base_estimated_minutes=300,
-            strength_score=0.90,             # strong → ~330 min
+            strength_score=0.90,
             priority=Priority.CRITICAL,
         ),
     ]
 
-    # ------------------------------------------------------------------
-    # Run scheduler
-    # ------------------------------------------------------------------
     config = SchedulerConfig(
         slot_minutes=30,
         min_gap_minutes=10,
-        max_study_hours_by_week=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], # 5 hours per day
+        max_study_hours_by_week=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
         preferred_study_start=time(8, 0),
         preferred_study_end=time(22, 30),
         days_before_deadline_buffer=0,
         strategy=SchedulingStrategy.SPREAD_OUT,
     )
-
     scheduler = Scheduler(config)
+
+    # ==================================================================
+    # STEP 1: Store fixed blocks into MongoDB
+    # ==================================================================
+    print("=" * 60)
+    print("  STEP 1 — Load sample fixed blocks into MongoDB")
+    print("=" * 60)
+    n = db_add_blocks(DEMO_USER_ID, timetable, source="fixed")
+    print(f"  Wrote {n} fixed blocks to DB\n")
+
+    # ==================================================================
+    # STEP 2: Run scheduler, store generated blocks
+    # ==================================================================
+    print("=" * 60)
+    print("  STEP 2 — Run scheduler & store generated study sessions")
+    print("=" * 60)
     result = scheduler.build(
         timetable_blocks=timetable,
         assignments=assignments,
-        scheduling_start=dt(0, 7, 30),    # schedule from Monday 07:30
+        scheduling_start=dt(0, 7, 30),
     )
-
     print(result.summary())
-    print(result.display_timetable(timetable_blocks=timetable))
+
+    n = db_add_blocks(DEMO_USER_ID, result.new_study_blocks, source="generated")
+    print(f"  Wrote {n} generated blocks to DB\n")
+
+    # ==================================================================
+    # STEP 3: Re-read everything from DB and print
+    # ==================================================================
+    print("=" * 60)
+    print("  STEP 3 — Re-read full schedule from MongoDB")
+    print("=" * 60)
+    all_blocks = get_user_schedule(DEMO_USER_ID)
+    print(f"  Total blocks in DB: {len(all_blocks)}")
+    fixed_count = len(get_user_schedule(DEMO_USER_ID, source="fixed"))
+    gen_count = len(get_user_schedule(DEMO_USER_ID, source="generated"))
+    print(f"    Fixed: {fixed_count}  |  Generated: {gen_count}\n")
+    print(_display_blocks(all_blocks))
+
+    # ==================================================================
+    # STEP 4: User adds a new fixed break → regenerate
+    # ==================================================================
+    print("\n" + "=" * 60)
+    print("  STEP 4 — User adds a fixed break on Wednesday afternoon")
+    print("=" * 60)
+    new_break = make_block(
+        "Doctor's Appointment",
+        BlockType.PERSONAL,
+        dt(2, 10, 30),
+        dt(2, 12, 0),
+        notes="GP check-up, cannot reschedule.",
+    )
+    db_add_blocks(DEMO_USER_ID, [new_break], source="fixed")
+    print("  ✓ Added 'Doctor's Appointment' (Wed 10:30–12:00) as fixed\n")
+
+    # Clear old generated blocks
+    deleted = clear_generated_blocks(DEMO_USER_ID)
+    print(f"  ✓ Cleared {deleted} old generated blocks\n")
+
+    # Re-read fixed blocks from DB (this is now the scheduler's input)
+    fixed_blocks = get_user_schedule(DEMO_USER_ID, source="fixed")
+    print(f"  Fixed blocks now in DB: {len(fixed_blocks)}")
+
+    # Regenerate
+    print("\n  Re-running scheduler with updated fixed blocks …\n")
+    result2 = scheduler.build(
+        timetable_blocks=fixed_blocks,
+        assignments=assignments,
+        scheduling_start=dt(0, 7, 30),
+    )
+    print(result2.summary())
+
+    # Store new generated blocks
+    n = db_add_blocks(DEMO_USER_ID, result2.new_study_blocks, source="generated")
+    print(f"  Wrote {n} new generated blocks to DB\n")
+
+    # ==================================================================
+    # STEP 5: Final re-read from DB and print
+    # ==================================================================
+    print("=" * 60)
+    print("  STEP 5 — Final schedule read from MongoDB")
+    print("=" * 60)
+    final_blocks = get_user_schedule(DEMO_USER_ID)
+    final_fixed = len(get_user_schedule(DEMO_USER_ID, source="fixed"))
+    final_gen = len(get_user_schedule(DEMO_USER_ID, source="generated"))
+    print(f"  Total blocks in DB: {len(final_blocks)}")
+    print(f"    Fixed: {final_fixed}  |  Generated: {final_gen}\n")
+    print(_display_blocks(final_blocks))
+
+    print("\n✓ Demo complete — all data persisted in MongoDB.")
 
 
 if __name__ == "__main__":

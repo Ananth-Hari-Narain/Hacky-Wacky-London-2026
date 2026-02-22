@@ -1,48 +1,23 @@
 """
-db_cleanup.py
-
-Helper utilities to inspect and clean up MongoDB collections.
+MongoDB inspection and cleanup utility.
 
 Usage:
-    python db_cleanup.py list-dbs
-    python db_cleanup.py list-collections [--db question_bank]
-    python db_cleanup.py count [--db question_bank] [--collection questions]
-    python db_cleanup.py preview [--db question_bank] [--collection questions] [--limit 5]
-    python db_cleanup.py drop-collection [--db question_bank] [--collection questions]
-    python db_cleanup.py drop-db [--db learning_engine]
-    python db_cleanup.py clear [--db question_bank] [--collection questions]
-    python db_cleanup.py clear [--db question_bank] [--collection questions] --filter '{"source": "old_file.pdf"}'
-
-Environment variables (set in .env or shell):
-    MONGODB_URI - MongoDB Atlas connection string
+    python -m scripts.db_cleanup list-dbs
+    python -m scripts.db_cleanup list-collections [--db question_bank]
+    python -m scripts.db_cleanup count [--db question_bank] [--collection questions]
+    python -m scripts.db_cleanup preview [--db question_bank] [--collection questions]
+    python -m scripts.db_cleanup drop-collection [--db question_bank] [--collection questions]
+    python -m scripts.db_cleanup drop-db [--db learning_engine]
+    python -m scripts.db_cleanup clear [--db question_bank] [--collection questions]
 """
-
 import argparse
 import json
-import os
-import sys
 
-import certifi
-from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
+from models.db import get_client
 
-load_dotenv()
-
-MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-
-
-def get_client():
-    return MongoClient(MONGODB_URI, server_api=ServerApi("1"), tlsCAFile=certifi.where())
-
-
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def cmd_list_dbs():
-    client = get_client()
-    for db_name in sorted(client.list_database_names()):
+    for db_name in sorted(get_client().list_database_names()):
         print(f"  {db_name}")
 
 
@@ -65,7 +40,6 @@ def cmd_count(db_name: str, collection_name: str):
 def cmd_preview(db_name: str, collection_name: str, limit: int):
     coll = get_client()[db_name][collection_name]
     for doc in coll.find({}, {"embedding": 0, "topic_vector": 0}).limit(limit):
-        # Convert ObjectId and datetime to strings for display
         doc["_id"] = str(doc["_id"])
         if "updated_at" in doc:
             doc["updated_at"] = str(doc["updated_at"])
@@ -93,28 +67,22 @@ def cmd_clear(db_name: str, collection_name: str, filter_str: str | None):
 
 
 def cmd_drop_collection(db_name: str, collection_name: str):
-    db = get_client()[db_name]
     confirm = input(f"Drop collection {db_name}.{collection_name}? [y/N] ")
     if confirm.lower() != "y":
         print("Aborted.")
         return
-    db.drop_collection(collection_name)
+    get_client()[db_name].drop_collection(collection_name)
     print(f"Dropped {db_name}.{collection_name}")
 
 
 def cmd_drop_db(db_name: str):
-    client = get_client()
     confirm = input(f"Drop entire database '{db_name}'? [y/N] ")
     if confirm.lower() != "y":
         print("Aborted.")
         return
-    client.drop_database(db_name)
+    get_client().drop_database(db_name)
     print(f"Dropped database '{db_name}'")
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="MongoDB cleanup helpers")
@@ -122,10 +90,10 @@ def main():
         "list-dbs", "list-collections", "count", "preview",
         "clear", "drop-collection", "drop-db",
     ])
-    parser.add_argument("--db", default="question_bank", help="Database name (default: question_bank)")
-    parser.add_argument("--collection", default="questions", help="Collection name (default: questions)")
-    parser.add_argument("--limit", type=int, default=5, help="Number of docs to preview (default: 5)")
-    parser.add_argument("--filter", default=None, help='JSON filter for clear, e.g. \'{"source": "old.pdf"}\'')
+    parser.add_argument("--db", default="question_bank")
+    parser.add_argument("--collection", default="questions")
+    parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--filter", default=None)
     args = parser.parse_args()
 
     match args.command:

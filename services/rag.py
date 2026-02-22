@@ -1,21 +1,18 @@
 """
 RAG (Retrieval-Augmented Generation) helper.
 
-Searches ingested solution_chunks and notes_chunks in MongoDB using
-cosine similarity against a query embedding, and returns the top-k
-most relevant text passages as context for the grader.
+Searches MongoDB collections using cosine similarity against a query
+embedding, and returns the top-k most relevant text passages.
 """
 from typing import List
 
-from marking.db import qb
-from marking.openai_client import client as openai_client
+from config.settings import EMBEDDING_MODEL
+from models.db import qb
+from services.openai_client import client as openai_client
 
 
 def _embed(text: str) -> List[float]:
-    resp = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text,
-    )
+    resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=text)
     return resp.data[0].embedding
 
 
@@ -29,11 +26,6 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
 
 
 def search_chunks(query: str, collections: List[str], top_k: int = 3) -> str:
-    """
-    Search the given MongoDB collections for chunks relevant to `query`.
-    Returns the top-k results concatenated as a single context string,
-    or an empty string if no chunks are found.
-    """
     if not query.strip():
         return ""
 
